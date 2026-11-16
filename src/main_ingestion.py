@@ -12,7 +12,7 @@ import requests
 import yt_dlp
 import firebase_admin
 from firebase_admin import credentials, firestore
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+from youtube_transcript_api import YouTubeTranscriptApi
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
@@ -21,12 +21,20 @@ logger = logging.getLogger(__name__)
 
 class EduExtractIngestionPipeline:
     """
-    Unified Layer 0 (Discovery via YouTube API v3) & Layer 1 (Anti-Bot Transcript Ingestion)
+    Unified Layer 0 (Discovery via YouTube API v3) & Layer 1 (Multi-Engine Anti-Bot Transcript Ingestion)
     integrated with Firebase Firestore state management.
     """
 
     SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
     VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+
+    # Public Invidious instances for cookie-less datacenter fallback
+    INVIDIOUS_INSTANCES = [
+        "https://inv.tux.pizza",
+        "https://invidious.nerdvpn.de",
+        "https://invidious.privacyredirect.com",
+        "https://iv.ggtyler.dev"
+    ]
 
     def __init__(self, languages: List[str] = ["en", "fa"]):
         self.languages = languages
@@ -42,7 +50,6 @@ class EduExtractIngestionPipeline:
         self.cookie_file_path = self._prepare_cookie_file()
 
     def _init_firestore(self) -> firestore.Client:
-        """Initializes Firestore using FIREBASE_CREDENTIALS_B64 from GitHub Secrets."""
         if firebase_admin._apps:
             return firestore.client()
 
@@ -60,9 +67,8 @@ class EduExtractIngestionPipeline:
         return firestore.client()
 
     def _prepare_cookie_file(self) -> Optional[str]:
-        """Decodes YOUTUBE_COOKIES_B64 into a temporary Netscape cookie file."""
-        if not self.cookies_b64:
-            logger.warning("YOUTUBE_COOKIES_B64 not set. Proceeding without cookies (fallback active).")
+        if not self.cookies_b64 or not self.cookies_b64.strip():
+            logger.warning("YOUTUBE_COOKIES_B64 not set. Proceeding without cookies (multi-fallback active).")
             return None
 
         try:
@@ -70,7 +76,7 @@ class EduExtractIngestionPipeline:
             temp_cookie = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt", encoding="utf-8")
             temp_cookie.write(decoded)
             temp_cookie.close()
-            logger.info("Loaded YouTube cookies from secret.")
+            logger.info("Loaded YouTube cookies from YOUTUBE_COOKIES_B64 secret.")
             return temp_cookie.name
         except Exception as e:
             logger.error(f"Cookie decode error: {e}")
@@ -85,7 +91,6 @@ class EduExtractIngestionPipeline:
         return round(h * 60 + m + (s / 60), 1)
 
     def discover_top_videos(self, topic: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Finds top_k highest-engaged educational videos with closed captions."""
         logger.info(f"Searching YouTube API v3 for topic: '{topic}'...")
         search_params = {
             "part": "snippet",
@@ -141,18 +146,27 @@ class EduExtractIngestionPipeline:
         ranked = sorted(candidates, key=lambda x: x["engagement_score"], reverse=True)
         return ranked[:top_k]
 
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=8))
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=6))
     def _fetch_primary_transcript(self, video_id: str) -> str:
-        proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
-        t_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=self.cookie_file_path, proxies=proxies)
+        """ Engine 1: Compatible with both youtube-transcript-api v1.0+ and v0.6.x """
         try:
-            transcript = t_list.find_manually_created_transcript(self.languages)
-        except NoTranscriptFound:
-            transcript = t_list.find_generated_transcript(self.languages)
-        return " ".join([seg["text"].replace("\n", " ") for seg in transcript.fetch()])
+            # New API (v1.0.0+)
+            ytt_api = YouTubeTranscriptApi()
+            fetched = ytt_api.fetch(video_id, languages=self.languages)
+            return " ".join([
+                (seg.text if hasattr(seg, "text") else seg["text"]).replace("\n", " ")
+                for seg in fetched
+            ])
+        except (AttributeError, TypeError):
+            # Legacy API (v0.6.x)
+            proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
+            t_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=self.cookie_file_path, proxies=proxies)
+            transcript = t_list.find_transcript(self.languages)
+            return " ".join([seg["text"].replace("\n", " ") for seg in transcript.fetch()])
 
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=3, min=3, max=10))
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=8))
     def _fetch_ytdlp_fallback(self, video_id: str) -> str:
+        """ Engine 2: yt-dlp with TV/iOS client spoofing & optional cookies """
         url = f"https://www.youtube.com/watch?v={video_id}"
         ydl_opts: Dict[str, Any] = {
             "skip_download": True,
@@ -161,7 +175,8 @@ class EduExtractIngestionPipeline:
             "subtitleslangs": self.languages,
             "quiet": True,
             "no_warnings": True,
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+            # tv_embedded and ios bypass most unauthenticated bot checks
+            "extractor_args": {"youtube": {"player_client": ["tv_embedded", "ios", "android"]}},
         }
         if self.cookie_file_path:
             ydl_opts["cookiefile"] = self.cookie_file_path
@@ -198,18 +213,56 @@ class EduExtractIngestionPipeline:
             ]
             return " ".join(words)
 
+    def _fetch_invidious_fallback(self, video_id: str) -> str:
+        """ Engine 3: Cookie-less fallback via public Invidious instances (bypasses datacenter IP bans) """
+        for instance in self.INVIDIOUS_INSTANCES:
+            try:
+                api_url = f"{instance}/api/v1/captions/{video_id}"
+                resp = requests.get(api_url, timeout=10)
+                if resp.status_code != 200:
+                    continue
+
+                captions = resp.json().get("captions", [])
+                target_url = None
+                for cap in captions:
+                    if cap.get("language_code", "").startswith("en"):
+                        target_url = f"{instance}{cap['url']}"
+                        break
+
+                if not target_url and captions:
+                    target_url = f"{instance}{captions[0]['url']}"
+
+                if target_url:
+                    vtt_resp = requests.get(target_url, timeout=10)
+                    if vtt_resp.status_code == 200:
+                        lines = []
+                        for line in vtt_resp.text.splitlines():
+                            line = line.strip()
+                            if not line or line.startswith("WEBVTT") or "-->" in line or line.isdigit():
+                                continue
+                            clean_line = re.sub(r"<[^>]+>", "", line)
+                            lines.append(clean_line)
+                        full_text = " ".join(lines)
+                        if len(full_text) > 100:
+                            return full_text
+            except Exception as e:
+                logger.debug(f"Invidious instance {instance} failed: {e}")
+                continue
+        raise RuntimeError(f"All Invidious instances failed for {video_id}")
+
     def extract_transcript(self, video_id: str) -> tuple[str, str]:
-        """Returns (transcript_text, engine_used)."""
+        """Tries Engine 1 -> Engine 2 -> Engine 3 sequentially."""
         try:
-            text = self._fetch_primary_transcript(video_id)
-            return text, "youtube-transcript-api"
-        except Exception as e:
-            logger.warning(f"Primary transcript API failed for {video_id} ({e}). Trying yt-dlp fallback...")
-            text = self._fetch_ytdlp_fallback(video_id)
-            return text, "yt-dlp-fallback"
+            return self._fetch_primary_transcript(video_id), "youtube-transcript-api"
+        except Exception as e1:
+            logger.warning(f"Engine 1 failed for {video_id} ({type(e1).__name__}). Trying Engine 2 (yt-dlp)...")
+            try:
+                return self._fetch_ytdlp_fallback(video_id), "yt-dlp-fallback"
+            except Exception as e2:
+                logger.warning(f"Engine 2 failed for {video_id}. Trying Engine 3 (Invidious Mirror)...")
+                return self._fetch_invidious_fallback(video_id), "invidious-mirror"
 
     def run(self, topic: str, top_k: int = 5):
-        """Main workflow: Discover -> Idempotency Check -> Extract Transcript -> Save to Firestore."""
         top_videos = self.discover_top_videos(topic=topic, top_k=top_k)
         col_ref = self.db.collection("Pipeline_State")
 
@@ -218,7 +271,6 @@ class EduExtractIngestionPipeline:
             doc_ref = col_ref.document(vid_id)
             snapshot = doc_ref.get()
 
-            # Idempotency check: Skip if transcript is already ingested or processed
             if snapshot.exists and snapshot.to_dict().get("status") in ["INGESTED", "EXTRACTED", "VALIDATED", "SYNCED"]:
                 logger.info(f"[SKIP] Video {vid_id} already processed (status: {snapshot.to_dict().get('status')}).")
                 continue
@@ -231,6 +283,7 @@ class EduExtractIngestionPipeline:
                     "char_count": len(transcript_text),
                     "ingestion_engine": engine,
                     "status": "INGESTED",
+                    "error_log": firestore.DELETE_FIELD,
                     "updated_at": datetime.now(timezone.utc).isoformat()
                 })
                 doc_ref.set(vid, merge=True)
