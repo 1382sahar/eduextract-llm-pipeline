@@ -1,10 +1,11 @@
 import os
 import re
+import glob
 import json
 import base64
 import logging
 import tempfile
-import urllib.request
+import subprocess
 from http.cookiejar import MozillaCookieJar
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
@@ -13,7 +14,6 @@ import requests
 import yt_dlp
 import firebase_admin
 from firebase_admin import credentials, firestore
-from youtube_transcript_api import YouTubeTranscriptApi
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
@@ -22,19 +22,12 @@ logger = logging.getLogger(__name__)
 
 class EduExtractIngestionPipeline:
     """
-    Unified Layer 0 (Discovery via YouTube API v3) & Layer 1 (Authenticated Multi-Engine Transcript Ingestion)
+    Unified Layer 0 (Discovery via YouTube API v3) & Layer 1 (Authenticated Transcript Ingestion)
     integrated with Firebase Firestore state management.
     """
 
     SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
     VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
-
-    PIPED_INSTANCES = [
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.tokhmi.xyz",
-        "https://pipedapi.syncpundit.io",
-        "https://api.piped.private.coffee"
-    ]
 
     def __init__(self, languages: List[str] = ["en", "fa"]):
         self.languages = languages
@@ -74,7 +67,6 @@ class EduExtractIngestionPipeline:
         try:
             decoded = base64.b64decode(self.cookies_b64).decode("utf-8")
             temp_cookie = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt", encoding="utf-8")
-            # Ensure Netscape header exists for MozillaCookieJar compatibility
             if not decoded.lstrip().startswith("# Netscape HTTP Cookie File"):
                 temp_cookie.write("# Netscape HTTP Cookie File\n")
             temp_cookie.write(decoded)
@@ -86,7 +78,6 @@ class EduExtractIngestionPipeline:
             return None
 
     def _build_authenticated_session(self) -> requests.Session:
-        """Creates a requests.Session pre-loaded with the Netscape cookie file and browser headers."""
         session = requests.Session()
         session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -164,76 +155,63 @@ class EduExtractIngestionPipeline:
         ranked = sorted(candidates, key=lambda x: x["engagement_score"], reverse=True)
         return ranked[:top_k]
 
-    def _fetch_primary_transcript(self, video_id: str) -> str:
-        """Engine 1: youtube-transcript-api v1.0+ WITH authenticated cookie session."""
-        session = self._build_authenticated_session()
-        try:
-            ytt_api = YouTubeTranscriptApi(http_client=session)
-            fetched = ytt_api.fetch(video_id, languages=self.languages)
-            return " ".join([
-                (seg.text if hasattr(seg, "text") else seg["text"]).replace("\n", " ")
-                for seg in fetched
-            ])
-        except TypeError:
-            # Fallback if installed version doesn't take http_client
-            proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
-            t_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=self.cookie_file_path, proxies=proxies)
-            transcript = t_list.find_transcript(self.languages)
-            return " ".join([seg["text"].replace("\n", " ") for seg in transcript.fetch()])
-
-    def _fetch_ytdlp_fallback(self, video_id: str) -> str:
+    def _fetch_ytdlp_python(self, video_id: str) -> str:
         """
-        Engine 2: yt-dlp WITHOUT conflicting mobile player_client overrides when cookies are present.
+        Engine 1: yt-dlp Python API with ignore_no_formats_error=True so it never fails
+        when video streams are restricted on datacenter IPs.
         """
         url = f"https://www.youtube.com/watch?v={video_id}"
         ydl_opts: Dict[str, Any] = {
             "skip_download": True,
+            "ignore_no_formats_error": True,  # CRITICAL FIX: Ignore missing video formats!
+            "check_formats": False,           # Do not probe video formats, we only want subtitles
             "writesubtitles": True,
             "writeautomaticsub": True,
-            "subtitleslangs": self.languages,
+            "subtitleslangs": ["en.*", "en", "fa"],
             "quiet": True,
             "no_warnings": True,
         }
 
         if self.cookie_file_path:
-            # Web cookies MUST use default web/mweb clients, NOT ios/tv_embedded
             ydl_opts["cookiefile"] = self.cookie_file_path
-        else:
-            ydl_opts["extractor_args"] = {"youtube": {"player_client": ["ios", "web"]}}
 
         if self.proxy_url:
             ydl_opts["proxy"] = self.proxy_url
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            if not info:
+                raise ValueError(f"Empty info dict returned for {video_id}")
+
             subs = info.get("subtitles") or {}
             auto_subs = info.get("automatic_captions") or {}
 
             tracks = None
-            for lang in self.languages:
-                if lang in subs:
-                    tracks = subs[lang]
+            # Check manual English subtitles first
+            for key in subs:
+                if key == "en" or key.startswith("en-"):
+                    tracks = subs[key]
                     break
-                if lang in auto_subs:
-                    tracks = auto_subs[lang]
-                    break
-
-            # Fallback to any English variant (e.g., en-US, en-GB, en-orig)
+            # Then check automatic English captions
             if not tracks:
-                for key in list(subs.keys()) + list(auto_subs.keys()):
-                    if key.startswith("en"):
-                        tracks = subs.get(key) or auto_subs.get(key)
+                for key in auto_subs:
+                    if key == "en" or key.startswith("en-"):
+                        tracks = auto_subs[key]
                         break
+            # Fallback to any available subtitle track
+            if not tracks:
+                all_tracks = list(subs.values()) + list(auto_subs.values())
+                if all_tracks:
+                    tracks = all_tracks[0]
 
             if not tracks:
-                raise ValueError(f"No subtitles found in metadata for {video_id}")
+                raise ValueError(f"No subtitle tracks found in info dict for {video_id}")
 
             json3_url = next((t["url"] for t in tracks if t.get("ext") == "json3"), tracks[0]["url"])
             session = self._build_authenticated_session()
             resp = session.get(json3_url, timeout=15)
             resp.raise_for_status()
 
-            # Parse either json3 or VTT/XML
             if "json3" in json3_url or resp.text.lstrip().startswith("{"):
                 sub_data = resp.json()
                 words = [
@@ -242,50 +220,74 @@ class EduExtractIngestionPipeline:
                     for seg in event.get("segs", [])
                     if seg.get("utf8", "").strip() and seg.get("utf8") != "\n"
                 ]
-                return " ".join(words)
+                text = " ".join(words)
             else:
                 clean_text = re.sub(r"<[^>]+>", " ", resp.text)
-                return " ".join(clean_text.split())
+                text = " ".join(clean_text.split())
 
-    def _fetch_piped_fallback(self, video_id: str) -> str:
-        """Engine 3: Public Piped API fallback for subtitle streams."""
-        for instance in self.PIPED_INSTANCES:
-            try:
-                resp = requests.get(f"{instance}/streams/{video_id}", timeout=10)
-                if resp.status_code != 200:
+            if len(text) < 50:
+                raise ValueError("Extracted transcript is too short/empty.")
+            return text
+
+    def _fetch_ytdlp_cli_fallback(self, video_id: str) -> str:
+        """
+        Engine 2: Direct CLI execution of yt-dlp writing .vtt subtitle file to disk
+        with --ignore-no-formats-error.
+        """
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_template = os.path.join(tmpdir, "%(id)s.%(ext)s")
+            cmd = [
+                "yt-dlp",
+                "--skip-download",
+                "--ignore-no-formats-error",
+                "--write-subs",
+                "--write-auto-subs",
+                "--sub-langs", "en.*,en",
+                "--sub-format", "vtt",
+                "-o", out_template,
+                url
+            ]
+            if self.cookie_file_path:
+                cmd.extend(["--cookies", self.cookie_file_path])
+
+            subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            vtt_files = glob.glob(os.path.join(tmpdir, "*.vtt"))
+            if not vtt_files:
+                raise RuntimeError(f"yt-dlp CLI did not produce any .vtt file for {video_id}")
+
+            with open(vtt_files[0], "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+
+            lines = []
+            for line in content.splitlines():
+                line = line.strip()
+                if (
+                    not line
+                    or line.startswith("WEBVTT")
+                    or line.startswith("Kind:")
+                    or line.startswith("Language:")
+                    or "-->" in line
+                    or line.isdigit()
+                ):
                     continue
-                subtitles = resp.json().get("subtitles", [])
-                sub_url = None
-                for sub in subtitles:
-                    if sub.get("code", "").startswith("en"):
-                        sub_url = sub.get("url")
-                        break
-                if sub_url:
-                    sub_resp = requests.get(sub_url, timeout=10)
-                    if sub_resp.status_code == 200:
-                        lines = [
-                            re.sub(r"<[^>]+>", "", l.strip())
-                            for l in sub_resp.text.splitlines()
-                            if l.strip() and not l.startswith("WEBVTT") and "-->" not in l and not l.strip().isdigit()
-                        ]
-                        text = " ".join(lines)
-                        if len(text) > 100:
-                            return text
-            except Exception:
-                continue
-        raise RuntimeError(f"All Piped instances failed for {video_id}")
+                clean_line = re.sub(r"<[^>]+>", "", line).strip()
+                if clean_line and (not lines or clean_line != lines[-1]):
+                    lines.append(clean_line)
+
+            full_text = " ".join(lines)
+            if len(full_text) < 50:
+                raise ValueError("CLI VTT transcript was empty.")
+            return full_text
 
     def extract_transcript(self, video_id: str) -> tuple[str, str]:
-        """Tries Engine 1 -> Engine 2 -> Engine 3 and logs exact exception reason."""
+        """Tries Engine 1 (yt-dlp Python API) -> Engine 2 (yt-dlp CLI Disk Writer)."""
         try:
-            return self._fetch_primary_transcript(video_id), "youtube-transcript-api"
+            return self._fetch_ytdlp_python(video_id), "yt-dlp-python"
         except Exception as e1:
-            logger.warning(f"Engine 1 failed for {video_id} ({type(e1).__name__}: {e1}). Trying Engine 2 (yt-dlp)...")
-            try:
-                return self._fetch_ytdlp_fallback(video_id), "yt-dlp-authenticated"
-            except Exception as e2:
-                logger.warning(f"Engine 2 failed for {video_id} ({type(e2).__name__}: {e2}). Trying Engine 3 (Piped)...")
-                return self._fetch_piped_fallback(video_id), "piped-mirror"
+            logger.warning(f"Engine 1 failed for {video_id} ({type(e1).__name__}: {e1}). Trying Engine 2 (yt-dlp CLI)...")
+            return self._fetch_ytdlp_cli_fallback(video_id), "yt-dlp-cli"
 
     def run(self, topic: str, top_k: int = 5):
         top_videos = self.discover_top_videos(topic=topic, top_k=top_k)
