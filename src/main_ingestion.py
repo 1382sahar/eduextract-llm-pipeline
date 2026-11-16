@@ -5,6 +5,7 @@ import base64
 import logging
 import tempfile
 import urllib.request
+from http.cookiejar import MozillaCookieJar
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
@@ -21,19 +22,18 @@ logger = logging.getLogger(__name__)
 
 class EduExtractIngestionPipeline:
     """
-    Unified Layer 0 (Discovery via YouTube API v3) & Layer 1 (Multi-Engine Anti-Bot Transcript Ingestion)
+    Unified Layer 0 (Discovery via YouTube API v3) & Layer 1 (Authenticated Multi-Engine Transcript Ingestion)
     integrated with Firebase Firestore state management.
     """
 
     SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
     VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 
-    # Public Invidious instances for cookie-less datacenter fallback
-    INVIDIOUS_INSTANCES = [
-        "https://inv.tux.pizza",
-        "https://invidious.nerdvpn.de",
-        "https://invidious.privacyredirect.com",
-        "https://iv.ggtyler.dev"
+    PIPED_INSTANCES = [
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.tokhmi.xyz",
+        "https://pipedapi.syncpundit.io",
+        "https://api.piped.private.coffee"
     ]
 
     def __init__(self, languages: List[str] = ["en", "fa"]):
@@ -68,12 +68,15 @@ class EduExtractIngestionPipeline:
 
     def _prepare_cookie_file(self) -> Optional[str]:
         if not self.cookies_b64 or not self.cookies_b64.strip():
-            logger.warning("YOUTUBE_COOKIES_B64 not set. Proceeding without cookies (multi-fallback active).")
+            logger.warning("YOUTUBE_COOKIES_B64 not set. Proceeding without cookies.")
             return None
 
         try:
             decoded = base64.b64decode(self.cookies_b64).decode("utf-8")
             temp_cookie = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt", encoding="utf-8")
+            # Ensure Netscape header exists for MozillaCookieJar compatibility
+            if not decoded.lstrip().startswith("# Netscape HTTP Cookie File"):
+                temp_cookie.write("# Netscape HTTP Cookie File\n")
             temp_cookie.write(decoded)
             temp_cookie.close()
             logger.info("Loaded YouTube cookies from YOUTUBE_COOKIES_B64 secret.")
@@ -81,6 +84,21 @@ class EduExtractIngestionPipeline:
         except Exception as e:
             logger.error(f"Cookie decode error: {e}")
             return None
+
+    def _build_authenticated_session(self) -> requests.Session:
+        """Creates a requests.Session pre-loaded with the Netscape cookie file and browser headers."""
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9"
+        })
+        if self.cookie_file_path:
+            cj = MozillaCookieJar(self.cookie_file_path)
+            cj.load(ignore_discard=True, ignore_expires=True)
+            session.cookies = cj
+        if self.proxy_url:
+            session.proxies = {"http": self.proxy_url, "https": self.proxy_url}
+        return session
 
     @staticmethod
     def _parse_iso_duration(duration_str: str) -> float:
@@ -146,27 +164,27 @@ class EduExtractIngestionPipeline:
         ranked = sorted(candidates, key=lambda x: x["engagement_score"], reverse=True)
         return ranked[:top_k]
 
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=6))
     def _fetch_primary_transcript(self, video_id: str) -> str:
-        """ Engine 1: Compatible with both youtube-transcript-api v1.0+ and v0.6.x """
+        """Engine 1: youtube-transcript-api v1.0+ WITH authenticated cookie session."""
+        session = self._build_authenticated_session()
         try:
-            # New API (v1.0.0+)
-            ytt_api = YouTubeTranscriptApi()
+            ytt_api = YouTubeTranscriptApi(http_client=session)
             fetched = ytt_api.fetch(video_id, languages=self.languages)
             return " ".join([
                 (seg.text if hasattr(seg, "text") else seg["text"]).replace("\n", " ")
                 for seg in fetched
             ])
-        except (AttributeError, TypeError):
-            # Legacy API (v0.6.x)
+        except TypeError:
+            # Fallback if installed version doesn't take http_client
             proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
             t_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=self.cookie_file_path, proxies=proxies)
             transcript = t_list.find_transcript(self.languages)
             return " ".join([seg["text"].replace("\n", " ") for seg in transcript.fetch()])
 
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=8))
     def _fetch_ytdlp_fallback(self, video_id: str) -> str:
-        """ Engine 2: yt-dlp with TV/iOS client spoofing & optional cookies """
+        """
+        Engine 2: yt-dlp WITHOUT conflicting mobile player_client overrides when cookies are present.
+        """
         url = f"https://www.youtube.com/watch?v={video_id}"
         ydl_opts: Dict[str, Any] = {
             "skip_download": True,
@@ -175,11 +193,14 @@ class EduExtractIngestionPipeline:
             "subtitleslangs": self.languages,
             "quiet": True,
             "no_warnings": True,
-            # tv_embedded and ios bypass most unauthenticated bot checks
-            "extractor_args": {"youtube": {"player_client": ["tv_embedded", "ios", "android"]}},
         }
+
         if self.cookie_file_path:
+            # Web cookies MUST use default web/mweb clients, NOT ios/tv_embedded
             ydl_opts["cookiefile"] = self.cookie_file_path
+        else:
+            ydl_opts["extractor_args"] = {"youtube": {"player_client": ["ios", "web"]}}
+
         if self.proxy_url:
             ydl_opts["proxy"] = self.proxy_url
 
@@ -197,70 +218,74 @@ class EduExtractIngestionPipeline:
                     tracks = auto_subs[lang]
                     break
 
+            # Fallback to any English variant (e.g., en-US, en-GB, en-orig)
             if not tracks:
-                raise ValueError(f"No subtitles available for {video_id}")
-
-            json3_url = next((t["url"] for t in tracks if t.get("ext") == "json3"), tracks[0]["url"])
-            req = urllib.request.Request(json3_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req) as resp:
-                sub_data = json.loads(resp.read().decode("utf-8"))
-
-            words = [
-                seg.get("utf8", "").strip()
-                for event in sub_data.get("events", [])
-                for seg in event.get("segs", [])
-                if seg.get("utf8", "").strip() and seg.get("utf8") != "\n"
-            ]
-            return " ".join(words)
-
-    def _fetch_invidious_fallback(self, video_id: str) -> str:
-        """ Engine 3: Cookie-less fallback via public Invidious instances (bypasses datacenter IP bans) """
-        for instance in self.INVIDIOUS_INSTANCES:
-            try:
-                api_url = f"{instance}/api/v1/captions/{video_id}"
-                resp = requests.get(api_url, timeout=10)
-                if resp.status_code != 200:
-                    continue
-
-                captions = resp.json().get("captions", [])
-                target_url = None
-                for cap in captions:
-                    if cap.get("language_code", "").startswith("en"):
-                        target_url = f"{instance}{cap['url']}"
+                for key in list(subs.keys()) + list(auto_subs.keys()):
+                    if key.startswith("en"):
+                        tracks = subs.get(key) or auto_subs.get(key)
                         break
 
-                if not target_url and captions:
-                    target_url = f"{instance}{captions[0]['url']}"
+            if not tracks:
+                raise ValueError(f"No subtitles found in metadata for {video_id}")
 
-                if target_url:
-                    vtt_resp = requests.get(target_url, timeout=10)
-                    if vtt_resp.status_code == 200:
-                        lines = []
-                        for line in vtt_resp.text.splitlines():
-                            line = line.strip()
-                            if not line or line.startswith("WEBVTT") or "-->" in line or line.isdigit():
-                                continue
-                            clean_line = re.sub(r"<[^>]+>", "", line)
-                            lines.append(clean_line)
-                        full_text = " ".join(lines)
-                        if len(full_text) > 100:
-                            return full_text
-            except Exception as e:
-                logger.debug(f"Invidious instance {instance} failed: {e}")
+            json3_url = next((t["url"] for t in tracks if t.get("ext") == "json3"), tracks[0]["url"])
+            session = self._build_authenticated_session()
+            resp = session.get(json3_url, timeout=15)
+            resp.raise_for_status()
+
+            # Parse either json3 or VTT/XML
+            if "json3" in json3_url or resp.text.lstrip().startswith("{"):
+                sub_data = resp.json()
+                words = [
+                    seg.get("utf8", "").strip()
+                    for event in sub_data.get("events", [])
+                    for seg in event.get("segs", [])
+                    if seg.get("utf8", "").strip() and seg.get("utf8") != "\n"
+                ]
+                return " ".join(words)
+            else:
+                clean_text = re.sub(r"<[^>]+>", " ", resp.text)
+                return " ".join(clean_text.split())
+
+    def _fetch_piped_fallback(self, video_id: str) -> str:
+        """Engine 3: Public Piped API fallback for subtitle streams."""
+        for instance in self.PIPED_INSTANCES:
+            try:
+                resp = requests.get(f"{instance}/streams/{video_id}", timeout=10)
+                if resp.status_code != 200:
+                    continue
+                subtitles = resp.json().get("subtitles", [])
+                sub_url = None
+                for sub in subtitles:
+                    if sub.get("code", "").startswith("en"):
+                        sub_url = sub.get("url")
+                        break
+                if sub_url:
+                    sub_resp = requests.get(sub_url, timeout=10)
+                    if sub_resp.status_code == 200:
+                        lines = [
+                            re.sub(r"<[^>]+>", "", l.strip())
+                            for l in sub_resp.text.splitlines()
+                            if l.strip() and not l.startswith("WEBVTT") and "-->" not in l and not l.strip().isdigit()
+                        ]
+                        text = " ".join(lines)
+                        if len(text) > 100:
+                            return text
+            except Exception:
                 continue
-        raise RuntimeError(f"All Invidious instances failed for {video_id}")
+        raise RuntimeError(f"All Piped instances failed for {video_id}")
 
     def extract_transcript(self, video_id: str) -> tuple[str, str]:
-        """Tries Engine 1 -> Engine 2 -> Engine 3 sequentially."""
+        """Tries Engine 1 -> Engine 2 -> Engine 3 and logs exact exception reason."""
         try:
             return self._fetch_primary_transcript(video_id), "youtube-transcript-api"
         except Exception as e1:
-            logger.warning(f"Engine 1 failed for {video_id} ({type(e1).__name__}). Trying Engine 2 (yt-dlp)...")
+            logger.warning(f"Engine 1 failed for {video_id} ({type(e1).__name__}: {e1}). Trying Engine 2 (yt-dlp)...")
             try:
-                return self._fetch_ytdlp_fallback(video_id), "yt-dlp-fallback"
+                return self._fetch_ytdlp_fallback(video_id), "yt-dlp-authenticated"
             except Exception as e2:
-                logger.warning(f"Engine 2 failed for {video_id}. Trying Engine 3 (Invidious Mirror)...")
-                return self._fetch_invidious_fallback(video_id), "invidious-mirror"
+                logger.warning(f"Engine 2 failed for {video_id} ({type(e2).__name__}: {e2}). Trying Engine 3 (Piped)...")
+                return self._fetch_piped_fallback(video_id), "piped-mirror"
 
     def run(self, topic: str, top_k: int = 5):
         top_videos = self.discover_top_videos(topic=topic, top_k=top_k)
