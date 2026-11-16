@@ -1,0 +1,39 @@
+name: Layer 0 & 1 - Video Discovery & Transcript Ingestion
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: 'Educational Topic (in English, e.g., Linear Algebra, Logic Circuits)'
+        required: true
+        default: 'Linear Algebra'
+      top_k:
+        description: 'Number of top videos to fetch'
+        required: true
+        default: '5'
+
+jobs:
+  ingest-educational-videos:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Execute Discovery & Transcript Ingestion
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          FIREBASE_CREDENTIALS_B64: ${{ secrets.FIREBASE_CREDENTIALS_B64 }}
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
+          TARGET_TOPIC: ${{ github.event.inputs.topic }}
+          TOP_K_VIDEOS: ${{ github.event.inputs.top_k }}
+        run: python src/main_ingestion.py

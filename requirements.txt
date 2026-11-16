@@ -1,0 +1,5 @@
+requests>=2.31.0
+firebase-admin>=6.5.0
+youtube-transcript-api>=0.6.2
+yt-dlp>=2024.8.6
+tenacity>=8.2.3
