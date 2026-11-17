@@ -6,7 +6,7 @@ import time
 import base64
 import logging
 from datetime import datetime, timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -14,6 +14,8 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from fpdf import FPDF
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
@@ -32,6 +34,77 @@ class ChunkSynthesis(BaseModel):
     key_takeaways: List[str] = Field(description="3 to 5 bullet-point exam takeaways")
     formulas_or_definitions: List[str] = Field(default_factory=list, description="Important formulas or definitions")
     flashcards: List[Flashcard] = Field(description="4 to 5 high-value flashcards")
+
+
+class LocalHuggingFaceBackup:
+    """
+    Lazy-loaded local LLM fallback (Qwen2.5-3B-Instruct).
+    Only loads into RAM if Gemini API fails, and automatically uses ~/.cache/huggingface.
+    """
+    MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
+
+    def __init__(self):
+        self.tokenizer = None
+        self.model = None
+
+    def _ensure_loaded(self):
+        if self.model is not None:
+            return
+        logger.info(f"[LOCAL BACKUP] Loading cached/local model '{self.MODEL_ID}' on CPU...")
+        self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.MODEL_ID,
+            torch_dtype=torch.float32,
+            device_map="cpu",
+            low_cpu_mem_usage=True
+        )
+        self.model.eval()
+        logger.info("[LOCAL BACKUP] Local model ready.")
+
+    @staticmethod
+    def _extract_json_block(raw_text: str) -> dict:
+        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        if not match:
+            raise ValueError("No JSON object found in local model output.")
+        return json.loads(match.group(0))
+
+    def synthesize(self, chunk_text: str, video_title: str, topic: str, chunk_idx: int) -> ChunkSynthesis:
+        self._ensure_loaded()
+
+        # محدود کردن طول ورودی برای سرعت بالای استنتاج روی CPU
+        trimmed_text = " ".join(chunk_text.split()[:650])
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an academic professor. Output ONLY valid JSON matching this exact schema:\n"
+                    '{"section_title": "str", "summary": "120-word explanation", '
+                    '"key_takeaways": ["point 1", "point 2", "point 3"], '
+                    '"formulas_or_definitions": ["formula 1"], '
+                    '"flashcards": [{"front": "question", "back": "answer", "difficulty": "Medium"}]}'
+                )
+            },
+            {
+                "role": "user",
+                "content": f"Lecture: {video_title} ({topic}) - Part {chunk_idx + 1}\n\nTranscript:\n{trimmed_text}"
+            }
+        ]
+
+        prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = self.tokenizer([prompt], return_tensors="pt")
+
+        with torch.no_grad():
+            generated_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=650,
+                temperature=0.2,
+                do_sample=True
+            )
+
+        output_ids = generated_ids[0][len(inputs.input_ids[0]):]
+        raw_output = self.tokenizer.decode(output_ids, skip_special_tokens=True)
+        parsed = self._extract_json_block(raw_output)
+        return ChunkSynthesis.model_validate(parsed)
 
 
 class StudyGuidePDF(FPDF):
@@ -77,12 +150,14 @@ class EduExtractLayer3Synthesizer:
     def __init__(self):
         self.db = self._init_firestore()
         api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("Missing GEMINI_API_KEY environment variable!")
+        self.client: Optional[genai.Client] = genai.Client(api_key=api_key) if api_key else None
+        self.model = self._select_active_gemini_model() if self.client else None
+        self.local_backup = LocalHuggingFaceBackup()
 
-        self.client = genai.Client(api_key=api_key)
-        self.model = self._select_active_gemini_model()
-        logger.info(f"Initialized Gemini Layer 3 Synthesizer with model: {self.model}")
+        if self.model:
+            logger.info(f"Primary Synthesizer: Gemini ({self.model}) | Backup: {LocalHuggingFaceBackup.MODEL_ID}")
+        else:
+            logger.warning("GEMINI_API_KEY missing; running directly on Local Backup model.")
 
         os.makedirs("artifacts/pdf", exist_ok=True)
         os.makedirs("artifacts/flashcards", exist_ok=True)
@@ -105,7 +180,6 @@ class EduExtractLayer3Synthesizer:
         return firestore.client()
 
     def _select_active_gemini_model(self) -> str:
-        """Selects gemini-3.8-flash or dynamically discovers the latest active Flash model."""
         try:
             available = [
                 m.name.replace("models/", "")
@@ -115,7 +189,6 @@ class EduExtractLayer3Synthesizer:
                 and "audio" not in m.name.lower()
                 and "tts" not in m.name.lower()
             ]
-            logger.info(f"Available Gemini Flash models: {available}")
             if "gemini-3.8-flash" in available:
                 return "gemini-3.8-flash"
             if available:
@@ -124,7 +197,10 @@ class EduExtractLayer3Synthesizer:
             logger.warning(f"Could not list Gemini models dynamically: {e}")
         return "gemini-3.8-flash"
 
-    def synthesize_chunk(self, chunk_text: str, video_title: str, topic: str, chunk_idx: int) -> ChunkSynthesis:
+    def _synthesize_with_gemini(self, chunk_text: str, video_title: str, topic: str, chunk_idx: int) -> ChunkSynthesis:
+        if not self.client or not self.model:
+            raise RuntimeError("Gemini client not configured.")
+
         prompt = (
             f"You are an expert university professor creating a structured study guide and flashcards "
             f"for a lecture titled '{video_title}' on the topic '{topic}'.\n"
@@ -133,7 +209,7 @@ class EduExtractLayer3Synthesizer:
             f"Transcript:\n{chunk_text}"
         )
 
-        for attempt in range(1, 4):
+        for attempt in range(1, 3):
             try:
                 response = self.client.models.generate_content(
                     model=self.model,
@@ -146,12 +222,27 @@ class EduExtractLayer3Synthesizer:
                 )
                 return ChunkSynthesis.model_validate_json(response.text)
             except Exception as e:
-                if attempt == 3:
+                if attempt == 2:
                     raise
-                logger.warning(f"Gemini retry {attempt}/3 on chunk {chunk_idx + 1}: {e}")
-                time.sleep(10 * attempt)
+                logger.warning(f"Gemini attempt {attempt}/2 failed on chunk {chunk_idx + 1}: {e}")
+                time.sleep(5)
 
-        raise RuntimeError(f"Failed to synthesize chunk {chunk_idx + 1}")
+        raise RuntimeError("Gemini synthesis failed.")
+
+    def synthesize_chunk_hybrid(
+        self, chunk_text: str, video_title: str, topic: str, chunk_idx: int
+    ) -> tuple[ChunkSynthesis, str]:
+        """Tries Gemini first; seamlessly falls back to cached local Qwen2.5-3B on any API failure."""
+        try:
+            result = self._synthesize_with_gemini(chunk_text, video_title, topic, chunk_idx)
+            return result, self.model
+        except Exception as gemini_err:
+            logger.warning(
+                f"[FALLBACK TRIGGERED] Gemini failed on chunk {chunk_idx + 1} ({gemini_err}). "
+                f"Switching to local backup ({LocalHuggingFaceBackup.MODEL_ID})..."
+            )
+            result = self.local_backup.synthesize(chunk_text, video_title, topic, chunk_idx)
+            return result, f"local:{LocalHuggingFaceBackup.MODEL_ID}"
 
     @staticmethod
     def generate_pdf(
@@ -253,6 +344,7 @@ class EduExtractLayer3Synthesizer:
             logger.info(f"Synthesizing Layer 3 for: {title} ({vid_id}) - {len(chunks)} chunks...")
             study_sections: List[Dict[str, Any]] = []
             all_flashcards: List[Dict[str, Any]] = []
+            models_used = set()
 
             try:
                 for idx, chunk_obj in enumerate(chunks):
@@ -260,7 +352,11 @@ class EduExtractLayer3Synthesizer:
                     if not chunk_text.strip():
                         continue
 
-                    result = self.synthesize_chunk(chunk_text, video_title=title, topic=topic, chunk_idx=idx)
+                    result, used_model = self.synthesize_chunk_hybrid(
+                        chunk_text, video_title=title, topic=topic, chunk_idx=idx
+                    )
+                    models_used.add(used_model)
+
                     sec_dict = result.model_dump()
                     study_sections.append({
                         "chunk_index": idx,
@@ -270,7 +366,7 @@ class EduExtractLayer3Synthesizer:
                         "formulas_or_definitions": sec_dict["formulas_or_definitions"]
                     })
                     all_flashcards.extend(sec_dict["flashcards"])
-                    time.sleep(2)
+                    time.sleep(1.5)
 
                 pdf_path = self.generate_pdf(vid_id, title, topic, study_sections, all_flashcards)
                 csv_path = self.export_anki_csv(vid_id, all_flashcards)
@@ -279,7 +375,7 @@ class EduExtractLayer3Synthesizer:
                     "study_guide_sections": study_sections,
                     "flashcards": all_flashcards,
                     "flashcard_count": len(all_flashcards),
-                    "llm_model_used": self.model,
+                    "llm_model_used": ", ".join(sorted(models_used)),
                     "status": "COMPLETED",
                     "completed_at": datetime.now(timezone.utc).isoformat()
                 })
