@@ -2,6 +2,7 @@ import os
 import re
 import csv
 import json
+import time
 import base64
 import logging
 from datetime import datetime, timezone
@@ -11,16 +12,13 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 from pydantic import BaseModel, Field
-from groq import Groq
+from groq import Groq, RateLimitError
 from fpdf import FPDF
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
 
 
-# ==========================================
-# ۱. تعریف ساختار داده با Pydantic
-# ==========================================
 class Flashcard(BaseModel):
     front: str = Field(description="Clear conceptual question or mathematical prompt")
     back: str = Field(description="Concise, accurate answer or formula explanation")
@@ -28,16 +26,13 @@ class Flashcard(BaseModel):
 
 
 class ChunkSynthesis(BaseModel):
-    section_title: str = Field(description="Descriptive academic title for this section of the lecture")
-    summary: str = Field(description="Comprehensive, well-structured explanation of the core concepts taught")
-    key_takeaways: List[str] = Field(description="3 to 5 bullet-point exam takeaways or mathematical rules")
-    formulas_or_definitions: List[str] = Field(default_factory=list, description="Important formulas or formal definitions mentioned")
-    flashcards: List[Flashcard] = Field(description="3 to 5 high-value flashcards testing deep understanding")
+    section_title: str = Field(description="Descriptive academic title for this section")
+    summary: str = Field(description="Clear, concise academic explanation (100-150 words)")
+    key_takeaways: List[str] = Field(description="3 concise bullet-point exam takeaways")
+    formulas_or_definitions: List[str] = Field(default_factory=list, description="Important formulas or definitions")
+    flashcards: List[Flashcard] = Field(description="3 high-value flashcards")
 
 
-# ==========================================
-# ۲. کلاس تولیدکننده PDF استاندارد
-# ==========================================
 class StudyGuidePDF(FPDF):
     def __init__(self, video_title: str, topic: str):
         super().__init__()
@@ -47,7 +42,6 @@ class StudyGuidePDF(FPDF):
         self.unicode_enabled = self._setup_fonts()
 
     def _setup_fonts(self) -> bool:
-        """Uses system DejaVu fonts on Ubuntu runners for full mathematical Unicode support."""
         regular_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
         bold_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
         if os.path.exists(regular_path) and os.path.exists(bold_path):
@@ -78,9 +72,6 @@ class StudyGuidePDF(FPDF):
         self.cell(0, 10, f"Page {self.page_no()}", align="C")
 
 
-# ==========================================
-# ۳. پایپ‌لاین اصلی لایه سوم
-# ==========================================
 class EduExtractLayer3Synthesizer:
     def __init__(self):
         self.db = self._init_firestore()
@@ -88,7 +79,7 @@ class EduExtractLayer3Synthesizer:
         if not api_key:
             raise ValueError("Missing GROQ_API_KEY environment variable!")
 
-        self.client = Groq(api_key=api_key)
+        self.client = Groq(api_key=api_key, max_retries=0)
         self.model = self._select_best_model()
         logger.info(f"Selected active Groq model for Layer 3: {self.model}")
 
@@ -114,77 +105,74 @@ class EduExtractLayer3Synthesizer:
 
     def _select_best_model(self) -> str:
         """
-        Queries Groq API for currently active models on this account so it never fails with 404.
+        Prioritizes high-throughput active models on this Groq account (avoiding tight 1000 OTPM limits).
         """
         try:
             models_resp = self.client.models.list()
             available_ids = [m.id for m in models_resp.data]
-            logger.info(f"Available Groq models on account: {available_ids}")
 
-            # فیلتر کردن مدل‌های صوتی، امنیتی یا تعبیه‌سازی
             excluded_keywords = ("whisper", "guard", "tts", "playai", "embed", "orpheus", "allam")
             chat_models = [
                 m for m in available_ids
                 if not any(kw in m.lower() for kw in excluded_keywords)
             ]
 
-            # اولویت‌بندی مدل‌های قدرتمند در صورت وجود
+            # اولویت با مدل‌های پرسرعت و با سقف توکن بالاتر روی اکانت شما
             preferred_order = [
+                "openai/gpt-oss-20b",
+                "openai/gpt-oss-120b",
                 "llama-3.3-70b-versatile",
-                "llama3-70b-8192",
-                "qwen-qwq-32b",
-                "qwen-2.5-32b",
-                "deepseek-r1-distill-llama-70b",
-                "gemma2-9b-it",
-                "llama3-8b-8192",
-                "mixtral-8x7b-32768",
+                "qwen/qwen3.8-27b",
             ]
             for preferred in preferred_order:
                 if preferred in chat_models:
                     return preferred
-
-            # انتخاب خودکار بهترین مدل موجود در لیست اکانت
-            for m in chat_models:
-                if "70b" in m.lower() or "versatile" in m.lower() or "llama" in m.lower():
-                    return m
 
             if chat_models:
                 return chat_models[0]
         except Exception as e:
             logger.warning(f"Could not fetch model list dynamically: {e}")
 
-        return "llama-3.3-70b-versatile"
+        return "openai/gpt-oss-20b"
 
     def synthesize_chunk(self, chunk_text: str, video_title: str, topic: str, chunk_idx: int) -> ChunkSynthesis:
         system_prompt = (
-            "You are an expert university professor creating a structured study guide and flashcards "
-            f"for a lecture titled '{video_title}' on the topic '{topic}'.\n"
-            "Analyze the provided transcript chunk and output ONLY a valid JSON object matching this exact schema:\n"
-            "{\n"
-            '  "section_title": "string",\n'
-            '  "summary": "string (detailed, clear academic explanation of 150-250 words)",\n'
-            '  "key_takeaways": ["string", "string"],\n'
-            '  "formulas_or_definitions": ["string"],\n'
-            '  "flashcards": [\n'
-            '    {"front": "question", "back": "answer", "difficulty": "Easy|Medium|Hard"}\n'
-            "  ]\n"
-            "}\n"
-            "Ensure mathematical explanations are rigorous, intuitive, and self-contained."
+            "You are an expert professor creating concise study notes and flashcards "
+            f"for '{video_title}' ({topic}).\n"
+            "Output ONLY valid JSON matching this schema:\n"
+            '{"section_title":"str","summary":"100-140 word explanation",'
+            '"key_takeaways":["3 short exam points"],'
+            '"formulas_or_definitions":["key formulas/terms"],'
+            '"flashcards":[{"front":"question","back":"concise answer","difficulty":"Easy|Medium|Hard"}]}'
         )
 
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0.2,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Transcript Chunk #{chunk_idx + 1}:\n\n{chunk_text}"}
-            ]
-        )
+        for attempt in range(1, 5):
+            try:
+                resp = self.client.chat.completions.create(
+                    model=self.model,
+                    temperature=0.2,
+                    max_tokens=750,  # جلوگیری از عبور از سقف توکن خروجی در دقیقه (OTPM)
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Chunk #{chunk_idx + 1}:\n{chunk_text}"}
+                    ]
+                )
+                raw_json = resp.choices[0].message.content
+                parsed_dict = json.loads(raw_json)
+                return ChunkSynthesis.model_validate(parsed_dict)
 
-        raw_json = resp.choices[0].message.content
-        parsed_dict = json.loads(raw_json)
-        return ChunkSynthesis.model_validate(parsed_dict)
+            except RateLimitError as e:
+                wait_sec = 35 * attempt
+                logger.warning(f"Rate limit hit on chunk {chunk_idx + 1} (attempt {attempt}/4). Waiting {wait_sec}s...")
+                time.sleep(wait_sec)
+            except Exception as e:
+                if attempt == 4:
+                    raise
+                logger.warning(f"Retryable error on chunk {chunk_idx + 1} (attempt {attempt}/4): {e}")
+                time.sleep(5)
+
+        raise RuntimeError(f"Failed to synthesize chunk {chunk_idx + 1} after 4 attempts.")
 
     @staticmethod
     def generate_pdf(
@@ -198,13 +186,11 @@ class EduExtractLayer3Synthesizer:
         pdf.add_page()
         f_name = pdf.font_family_name
 
-        # عنوان اصلی جزوه
         pdf.set_font(f_name, "B", 16)
         pdf.set_text_color(20, 40, 80)
         pdf.multi_cell(0, 10, pdf.safe_text(title))
         pdf.ln(4)
 
-        # بخش‌های آموزشی استخراج‌شده از هر چانک
         for idx, sec in enumerate(sections, 1):
             pdf.set_font(f_name, "B", 13)
             pdf.set_text_color(30, 80, 140)
@@ -236,7 +222,6 @@ class EduExtractLayer3Synthesizer:
 
             pdf.ln(3)
 
-        # صفحه فلش‌کارت‌ها در انتهای جزوه
         if flashcards:
             pdf.add_page()
             pdf.set_font(f_name, "B", 14)
@@ -272,7 +257,8 @@ class EduExtractLayer3Synthesizer:
 
     def run(self):
         col_ref = self.db.collection("Pipeline_State")
-        docs = col_ref.where(filter=FieldFilter("status", "==", "CLEANED")).stream()
+        # هم ویدیوهای جدید CLEANED و هم ویدیوهایی که دفعه قبل به Rate Limit خوردند را پردازش می‌کند
+        docs = col_ref.where(filter=FieldFilter("status", "in", ["CLEANED", "SYNTHESIS_FAILED"])).stream()
 
         synthesized_count = 0
         for doc in docs:
@@ -307,11 +293,12 @@ class EduExtractLayer3Synthesizer:
                     })
                     all_flashcards.extend(sec_dict["flashcards"])
 
-                # ۱. ساخت فایل PDF و فایل CSV فلش‌کارت برای Anki
+                    # مکث کوتاه بین درخواست‌ها برای رعایت سقف توکن در دقیقه (RPM/TPM)
+                    time.sleep(6)
+
                 pdf_path = self.generate_pdf(vid_id, title, topic, study_sections, all_flashcards)
                 csv_path = self.export_anki_csv(vid_id, all_flashcards)
 
-                # ۲. ذخیره در فایربیس و تغییر وضعیت به COMPLETED
                 doc.reference.update({
                     "study_guide_sections": study_sections,
                     "flashcards": all_flashcards,
