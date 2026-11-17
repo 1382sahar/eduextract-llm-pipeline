@@ -36,12 +36,16 @@ class ChunkSynthesis(BaseModel):
     flashcards: List[Flashcard] = Field(description="4 to 5 high-value flashcards")
 
 
+class VideoSynthesis(BaseModel):
+    sections: List[ChunkSynthesis] = Field(description="Ordered academic sections covering the entire lecture")
+
+
 class LocalHuggingFaceBackup:
     """
-    Lazy-loaded local LLM fallback (Qwen2.5-3B-Instruct).
-    Only loads into RAM if Gemini API fails, and automatically uses ~/.cache/huggingface.
+    Lazy-loaded local LLM fallback (Qwen2.5-1.5B-Instruct) running purely on CPU
+    without requiring `accelerate` or `device_map`.
     """
-    MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
+    MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 
     def __init__(self):
         self.tokenizer = None
@@ -54,9 +58,7 @@ class LocalHuggingFaceBackup:
         self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
         self.model = AutoModelForCausalLM.from_pretrained(
             self.MODEL_ID,
-            torch_dtype=torch.float32,
-            device_map="cpu",
-            low_cpu_mem_usage=True
+            dtype=torch.float32
         )
         self.model.eval()
         logger.info("[LOCAL BACKUP] Local model ready.")
@@ -68,11 +70,10 @@ class LocalHuggingFaceBackup:
             raise ValueError("No JSON object found in local model output.")
         return json.loads(match.group(0))
 
-    def synthesize(self, chunk_text: str, video_title: str, topic: str, chunk_idx: int) -> ChunkSynthesis:
+    def synthesize_chunk(self, chunk_text: str, video_title: str, topic: str, chunk_idx: int) -> ChunkSynthesis:
         self._ensure_loaded()
 
-        # محدود کردن طول ورودی برای سرعت بالای استنتاج روی CPU
-        trimmed_text = " ".join(chunk_text.split()[:650])
+        trimmed_text = " ".join(chunk_text.split()[:550])
         messages = [
             {
                 "role": "system",
@@ -96,7 +97,7 @@ class LocalHuggingFaceBackup:
         with torch.no_grad():
             generated_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=650,
+                max_new_tokens=550,
                 temperature=0.2,
                 do_sample=True
             )
@@ -112,6 +113,7 @@ class StudyGuidePDF(FPDF):
         super().__init__()
         self.video_title = video_title
         self.topic = topic
+        self.set_margins(left=15, top=15, right=15)
         self.set_auto_page_break(auto=True, margin=15)
         self.unicode_enabled = self._setup_fonts()
 
@@ -127,23 +129,32 @@ class StudyGuidePDF(FPDF):
         return False
 
     def safe_text(self, text: str) -> str:
+        # شکستن کلمات/فرمول‌های فوق‌طولانی بدون فاصله برای جلوگیری از سرریز عرض صفحه در fpdf2
+        cleaned = re.sub(r"(\S{55})", r"\1 ", str(text))
         if self.unicode_enabled:
-            return text
-        return text.encode("latin-1", "replace").decode("latin-1")
+            return cleaned
+        return cleaned.encode("latin-1", "replace").decode("latin-1")
+
+    def write_block(self, text: str, line_height: float = 6.0):
+        """Always resets X to left margin and uses explicit effective page width (`epw`)."""
+        self.set_x(self.l_margin)
+        self.multi_cell(self.epw, line_height, self.safe_text(text))
 
     def header(self):
-        self.set_font(self.font_family_name, "B", 10)
+        self.set_x(self.l_margin)
+        self.set_font(self.font_family_name, "B", 9)
         self.set_text_color(100, 100, 100)
-        header_text = self.safe_text(f"EduExtract Study Guide | Topic: {self.topic}")
-        self.cell(0, 8, header_text, new_x="LMARGIN", new_y="NEXT", align="R")
-        self.line(10, 18, 200, 18)
+        self.cell(self.epw, 8, self.safe_text(f"EduExtract Study Guide | Topic: {self.topic}"), align="R")
+        self.ln(9)
+        self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
         self.ln(4)
 
     def footer(self):
         self.set_y(-15)
+        self.set_x(self.l_margin)
         self.set_font(self.font_family_name, "", 9)
         self.set_text_color(128, 128, 128)
-        self.cell(0, 10, f"Page {self.page_no()}", align="C")
+        self.cell(self.epw, 10, f"Page {self.page_no()}", align="C")
 
 
 class EduExtractLayer3Synthesizer:
@@ -153,6 +164,7 @@ class EduExtractLayer3Synthesizer:
         self.client: Optional[genai.Client] = genai.Client(api_key=api_key) if api_key else None
         self.model = self._select_active_gemini_model() if self.client else None
         self.local_backup = LocalHuggingFaceBackup()
+        self.gemini_quota_exhausted = False
 
         if self.model:
             logger.info(f"Primary Synthesizer: Gemini ({self.model}) | Backup: {LocalHuggingFaceBackup.MODEL_ID}")
@@ -197,16 +209,28 @@ class EduExtractLayer3Synthesizer:
             logger.warning(f"Could not list Gemini models dynamically: {e}")
         return "gemini-3.8-flash"
 
-    def _synthesize_with_gemini(self, chunk_text: str, video_title: str, topic: str, chunk_idx: int) -> ChunkSynthesis:
-        if not self.client or not self.model:
-            raise RuntimeError("Gemini client not configured.")
+    def _synthesize_whole_video_with_gemini(
+        self, chunks: List[Dict[str, Any]], video_title: str, topic: str
+    ) -> VideoSynthesis:
+        """
+        Sends all chunks of a video in ONE single Gemini request to conserve the 20 RPD free-tier quota.
+        """
+        if not self.client or not self.model or self.gemini_quota_exhausted:
+            raise RuntimeError("Gemini unavailable or daily quota exhausted.")
+
+        combined_transcript = "\n\n".join(
+            f"--- PART {i + 1} ---\n{c.get('text', '')}"
+            for i, c in enumerate(chunks)
+            if c.get("text", "").strip()
+        )
 
         prompt = (
-            f"You are an expert university professor creating a structured study guide and flashcards "
+            f"You are an expert university professor creating a complete structured study guide and flashcards "
             f"for a lecture titled '{video_title}' on the topic '{topic}'.\n"
-            f"Analyze Transcript Chunk #{chunk_idx + 1} below and extract a clear academic summary, "
-            "key exam takeaways, formal definitions/formulas, and deep conceptual flashcards.\n\n"
-            f"Transcript:\n{chunk_text}"
+            f"Below is the full lecture divided into {len(chunks)} parts. For EACH part, produce one structured section "
+            "with a descriptive title, a clear 150-220 word academic summary, 3-5 key exam takeaways, "
+            "important formulas/definitions, and 4-5 conceptual flashcards.\n\n"
+            f"{combined_transcript}"
         )
 
         for attempt in range(1, 3):
@@ -217,32 +241,64 @@ class EduExtractLayer3Synthesizer:
                     config=types.GenerateContentConfig(
                         temperature=0.2,
                         response_mime_type="application/json",
-                        response_schema=ChunkSynthesis,
+                        response_schema=VideoSynthesis,
                     ),
                 )
-                return ChunkSynthesis.model_validate_json(response.text)
+                return VideoSynthesis.model_validate_json(response.text)
             except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    self.gemini_quota_exhausted = True
+                    raise RuntimeError(f"Gemini daily quota exhausted: {e}")
                 if attempt == 2:
                     raise
-                logger.warning(f"Gemini attempt {attempt}/2 failed on chunk {chunk_idx + 1}: {e}")
-                time.sleep(5)
+                logger.warning(f"Gemini transient error (attempt {attempt}/2): {e}")
+                time.sleep(6)
 
-        raise RuntimeError("Gemini synthesis failed.")
+        raise RuntimeError("Gemini whole-video synthesis failed.")
 
-    def synthesize_chunk_hybrid(
-        self, chunk_text: str, video_title: str, topic: str, chunk_idx: int
-    ) -> tuple[ChunkSynthesis, str]:
-        """Tries Gemini first; seamlessly falls back to cached local Qwen2.5-3B on any API failure."""
+    def synthesize_video(
+        self, chunks: List[Dict[str, Any]], video_title: str, topic: str
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
+        """Tries 1-shot Gemini synthesis first; falls back to chunk-by-chunk local Qwen2.5-1.5B if needed."""
         try:
-            result = self._synthesize_with_gemini(chunk_text, video_title, topic, chunk_idx)
-            return result, self.model
+            video_res = self._synthesize_whole_video_with_gemini(chunks, video_title, topic)
+            study_sections = []
+            all_flashcards = []
+            for idx, sec in enumerate(video_res.sections):
+                sec_dict = sec.model_dump()
+                study_sections.append({
+                    "chunk_index": idx,
+                    "section_title": sec_dict["section_title"],
+                    "summary": sec_dict["summary"],
+                    "key_takeaways": sec_dict["key_takeaways"],
+                    "formulas_or_definitions": sec_dict["formulas_or_definitions"]
+                })
+                all_flashcards.extend(sec_dict["flashcards"])
+            return study_sections, all_flashcards, self.model
+
         except Exception as gemini_err:
             logger.warning(
-                f"[FALLBACK TRIGGERED] Gemini failed on chunk {chunk_idx + 1} ({gemini_err}). "
-                f"Switching to local backup ({LocalHuggingFaceBackup.MODEL_ID})..."
+                f"[FALLBACK TRIGGERED] Switching to local backup ({LocalHuggingFaceBackup.MODEL_ID}) "
+                f"because Gemini returned: {gemini_err}"
             )
-            result = self.local_backup.synthesize(chunk_text, video_title, topic, chunk_idx)
-            return result, f"local:{LocalHuggingFaceBackup.MODEL_ID}"
+            study_sections = []
+            all_flashcards = []
+            for idx, chunk_obj in enumerate(chunks):
+                chunk_text = chunk_obj.get("text", "")
+                if not chunk_text.strip():
+                    continue
+                sec = self.local_backup.synthesize_chunk(chunk_text, video_title, topic, idx)
+                sec_dict = sec.model_dump()
+                study_sections.append({
+                    "chunk_index": idx,
+                    "section_title": sec_dict["section_title"],
+                    "summary": sec_dict["summary"],
+                    "key_takeaways": sec_dict["key_takeaways"],
+                    "formulas_or_definitions": sec_dict["formulas_or_definitions"]
+                })
+                all_flashcards.extend(sec_dict["flashcards"])
+            return study_sections, all_flashcards, f"local:{LocalHuggingFaceBackup.MODEL_ID}"
 
     @staticmethod
     def generate_pdf(
@@ -256,38 +312,38 @@ class EduExtractLayer3Synthesizer:
         pdf.add_page()
         f_name = pdf.font_family_name
 
-        pdf.set_font(f_name, "B", 16)
+        pdf.set_font(f_name, "B", 15)
         pdf.set_text_color(20, 40, 80)
-        pdf.multi_cell(0, 10, pdf.safe_text(title))
+        pdf.write_block(title, line_height=9)
         pdf.ln(4)
 
         for idx, sec in enumerate(sections, 1):
-            pdf.set_font(f_name, "B", 13)
+            pdf.set_font(f_name, "B", 12)
             pdf.set_text_color(30, 80, 140)
-            pdf.multi_cell(0, 8, pdf.safe_text(f"{idx}. {sec.get('section_title', f'Section {idx}')}"))
+            pdf.write_block(f"{idx}. {sec.get('section_title', f'Section {idx}')}", line_height=8)
             pdf.ln(2)
 
-            pdf.set_font(f_name, "", 11)
+            pdf.set_font(f_name, "", 10)
             pdf.set_text_color(30, 30, 30)
-            pdf.multi_cell(0, 6, pdf.safe_text(sec.get("summary", "")))
+            pdf.write_block(sec.get("summary", ""), line_height=6)
             pdf.ln(3)
 
             takeaways = sec.get("key_takeaways", [])
             if takeaways:
-                pdf.set_font(f_name, "B", 11)
-                pdf.cell(0, 7, pdf.safe_text("Key Exam Takeaways:"), new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font(f_name, "B", 10)
+                pdf.write_block("Key Exam Takeaways:", line_height=6)
                 pdf.set_font(f_name, "", 10)
                 for item in takeaways:
-                    pdf.multi_cell(0, 6, pdf.safe_text(f"  • {item}"))
+                    pdf.write_block(f"  - {item}", line_height=6)
                 pdf.ln(2)
 
             formulas = sec.get("formulas_or_definitions", [])
             if formulas:
-                pdf.set_font(f_name, "B", 11)
-                pdf.cell(0, 7, pdf.safe_text("Formulas & Definitions:"), new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font(f_name, "B", 10)
+                pdf.write_block("Formulas & Definitions:", line_height=6)
                 pdf.set_font(f_name, "", 10)
                 for form in formulas:
-                    pdf.multi_cell(0, 6, pdf.safe_text(f"  ▪ {form}"))
+                    pdf.write_block(f"  * {form}", line_height=6)
                 pdf.ln(2)
 
             pdf.ln(3)
@@ -296,19 +352,17 @@ class EduExtractLayer3Synthesizer:
             pdf.add_page()
             pdf.set_font(f_name, "B", 14)
             pdf.set_text_color(20, 40, 80)
-            pdf.cell(0, 10, pdf.safe_text(f"Review Flashcards ({len(flashcards)} Cards)"), new_x="LMARGIN", new_y="NEXT")
+            pdf.write_block(f"Review Flashcards ({len(flashcards)} Cards)", line_height=8)
             pdf.ln(3)
 
             for i, card in enumerate(flashcards, 1):
                 pdf.set_font(f_name, "B", 10)
                 pdf.set_text_color(40, 40, 40)
-                q_text = f"Q{i} [{card.get('difficulty', 'Medium')}]: {card.get('front', '')}"
-                pdf.multi_cell(0, 6, pdf.safe_text(q_text))
+                pdf.write_block(f"Q{i} [{card.get('difficulty', 'Medium')}]: {card.get('front', '')}", line_height=6)
 
                 pdf.set_font(f_name, "", 10)
                 pdf.set_text_color(60, 60, 60)
-                a_text = f"A: {card.get('back', '')}"
-                pdf.multi_cell(0, 6, pdf.safe_text(a_text))
+                pdf.write_block(f"A: {card.get('back', '')}", line_height=6)
                 pdf.ln(3)
 
         safe_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", title)[:45].strip("_")
@@ -342,31 +396,10 @@ class EduExtractLayer3Synthesizer:
                 continue
 
             logger.info(f"Synthesizing Layer 3 for: {title} ({vid_id}) - {len(chunks)} chunks...")
-            study_sections: List[Dict[str, Any]] = []
-            all_flashcards: List[Dict[str, Any]] = []
-            models_used = set()
-
             try:
-                for idx, chunk_obj in enumerate(chunks):
-                    chunk_text = chunk_obj.get("text", "")
-                    if not chunk_text.strip():
-                        continue
-
-                    result, used_model = self.synthesize_chunk_hybrid(
-                        chunk_text, video_title=title, topic=topic, chunk_idx=idx
-                    )
-                    models_used.add(used_model)
-
-                    sec_dict = result.model_dump()
-                    study_sections.append({
-                        "chunk_index": idx,
-                        "section_title": sec_dict["section_title"],
-                        "summary": sec_dict["summary"],
-                        "key_takeaways": sec_dict["key_takeaways"],
-                        "formulas_or_definitions": sec_dict["formulas_or_definitions"]
-                    })
-                    all_flashcards.extend(sec_dict["flashcards"])
-                    time.sleep(1.5)
+                study_sections, all_flashcards, used_model = self.synthesize_video(
+                    chunks, video_title=title, topic=topic
+                )
 
                 pdf_path = self.generate_pdf(vid_id, title, topic, study_sections, all_flashcards)
                 csv_path = self.export_anki_csv(vid_id, all_flashcards)
@@ -375,16 +408,17 @@ class EduExtractLayer3Synthesizer:
                     "study_guide_sections": study_sections,
                     "flashcards": all_flashcards,
                     "flashcard_count": len(all_flashcards),
-                    "llm_model_used": ", ".join(sorted(models_used)),
+                    "llm_model_used": used_model,
                     "status": "COMPLETED",
                     "completed_at": datetime.now(timezone.utc).isoformat()
                 })
 
                 synthesized_count += 1
                 logger.info(
-                    f"[SUCCESS] {vid_id} -> Generated {len(study_sections)} study sections, "
+                    f"[SUCCESS] {vid_id} ({used_model}) -> Generated {len(study_sections)} study sections, "
                     f"{len(all_flashcards)} flashcards, and saved PDF to {pdf_path}"
                 )
+                time.sleep(2)
 
             except Exception as e:
                 logger.error(f"[FAILED] Layer 3 synthesis error for {vid_id}: {e}")
