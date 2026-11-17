@@ -12,7 +12,8 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 from pydantic import BaseModel, Field
-from groq import Groq, RateLimitError
+from google import genai
+from google.genai import types
 from fpdf import FPDF
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
@@ -27,10 +28,10 @@ class Flashcard(BaseModel):
 
 class ChunkSynthesis(BaseModel):
     section_title: str = Field(description="Descriptive academic title for this section")
-    summary: str = Field(description="Clear, concise academic explanation (100-150 words)")
-    key_takeaways: List[str] = Field(description="3 concise bullet-point exam takeaways")
+    summary: str = Field(description="Clear, well-structured academic explanation (150-220 words)")
+    key_takeaways: List[str] = Field(description="3 to 5 bullet-point exam takeaways")
     formulas_or_definitions: List[str] = Field(default_factory=list, description="Important formulas or definitions")
-    flashcards: List[Flashcard] = Field(description="3 high-value flashcards")
+    flashcards: List[Flashcard] = Field(description="4 to 5 high-value flashcards")
 
 
 class StudyGuidePDF(FPDF):
@@ -75,13 +76,13 @@ class StudyGuidePDF(FPDF):
 class EduExtractLayer3Synthesizer:
     def __init__(self):
         self.db = self._init_firestore()
-        api_key = os.getenv("GROQ_API_KEY")
+        api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise ValueError("Missing GROQ_API_KEY environment variable!")
+            raise ValueError("Missing GEMINI_API_KEY environment variable!")
 
-        self.client = Groq(api_key=api_key, max_retries=0)
-        self.model = self._select_best_model()
-        logger.info(f"Selected active Groq model for Layer 3: {self.model}")
+        self.client = genai.Client(api_key=api_key)
+        self.model = "gemini-2.5-flash"
+        logger.info(f"Initialized Gemini Layer 3 Synthesizer with model: {self.model}")
 
         os.makedirs("artifacts/pdf", exist_ok=True)
         os.makedirs("artifacts/flashcards", exist_ok=True)
@@ -103,76 +104,34 @@ class EduExtractLayer3Synthesizer:
         firebase_admin.initialize_app(cred)
         return firestore.client()
 
-    def _select_best_model(self) -> str:
-        """
-        Prioritizes high-throughput active models on this Groq account (avoiding tight 1000 OTPM limits).
-        """
-        try:
-            models_resp = self.client.models.list()
-            available_ids = [m.id for m in models_resp.data]
-
-            excluded_keywords = ("whisper", "guard", "tts", "playai", "embed", "orpheus", "allam")
-            chat_models = [
-                m for m in available_ids
-                if not any(kw in m.lower() for kw in excluded_keywords)
-            ]
-
-            # اولویت با مدل‌های پرسرعت و با سقف توکن بالاتر روی اکانت شما
-            preferred_order = [
-                "openai/gpt-oss-20b",
-                "openai/gpt-oss-120b",
-                "llama-3.3-70b-versatile",
-                "qwen/qwen3.8-27b",
-            ]
-            for preferred in preferred_order:
-                if preferred in chat_models:
-                    return preferred
-
-            if chat_models:
-                return chat_models[0]
-        except Exception as e:
-            logger.warning(f"Could not fetch model list dynamically: {e}")
-
-        return "openai/gpt-oss-20b"
-
     def synthesize_chunk(self, chunk_text: str, video_title: str, topic: str, chunk_idx: int) -> ChunkSynthesis:
-        system_prompt = (
-            "You are an expert professor creating concise study notes and flashcards "
-            f"for '{video_title}' ({topic}).\n"
-            "Output ONLY valid JSON matching this schema:\n"
-            '{"section_title":"str","summary":"100-140 word explanation",'
-            '"key_takeaways":["3 short exam points"],'
-            '"formulas_or_definitions":["key formulas/terms"],'
-            '"flashcards":[{"front":"question","back":"concise answer","difficulty":"Easy|Medium|Hard"}]}'
+        prompt = (
+            f"You are an expert university professor creating a structured study guide and flashcards "
+            f"for a lecture titled '{video_title}' on the topic '{topic}'.\n"
+            f"Analyze Transcript Chunk #{chunk_idx + 1} below and extract a clear academic summary, "
+            "key exam takeaways, formal definitions/formulas, and deep conceptual flashcards.\n\n"
+            f"Transcript:\n{chunk_text}"
         )
 
-        for attempt in range(1, 5):
+        for attempt in range(1, 4):
             try:
-                resp = self.client.chat.completions.create(
+                response = self.client.models.generate_content(
                     model=self.model,
-                    temperature=0.2,
-                    max_tokens=750,  # جلوگیری از عبور از سقف توکن خروجی در دقیقه (OTPM)
-                    response_format={"type": "json_object"},
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"Chunk #{chunk_idx + 1}:\n{chunk_text}"}
-                    ]
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.2,
+                        response_mime_type="application/json",
+                        response_schema=ChunkSynthesis,
+                    ),
                 )
-                raw_json = resp.choices[0].message.content
-                parsed_dict = json.loads(raw_json)
-                return ChunkSynthesis.model_validate(parsed_dict)
-
-            except RateLimitError as e:
-                wait_sec = 35 * attempt
-                logger.warning(f"Rate limit hit on chunk {chunk_idx + 1} (attempt {attempt}/4). Waiting {wait_sec}s...")
-                time.sleep(wait_sec)
+                return ChunkSynthesis.model_validate_json(response.text)
             except Exception as e:
-                if attempt == 4:
+                if attempt == 3:
                     raise
-                logger.warning(f"Retryable error on chunk {chunk_idx + 1} (attempt {attempt}/4): {e}")
-                time.sleep(5)
+                logger.warning(f"Gemini retry {attempt}/3 on chunk {chunk_idx + 1}: {e}")
+                time.sleep(10 * attempt)
 
-        raise RuntimeError(f"Failed to synthesize chunk {chunk_idx + 1} after 4 attempts.")
+        raise RuntimeError(f"Failed to synthesize chunk {chunk_idx + 1}")
 
     @staticmethod
     def generate_pdf(
@@ -257,7 +216,6 @@ class EduExtractLayer3Synthesizer:
 
     def run(self):
         col_ref = self.db.collection("Pipeline_State")
-        # هم ویدیوهای جدید CLEANED و هم ویدیوهایی که دفعه قبل به Rate Limit خوردند را پردازش می‌کند
         docs = col_ref.where(filter=FieldFilter("status", "in", ["CLEANED", "SYNTHESIS_FAILED"])).stream()
 
         synthesized_count = 0
@@ -292,9 +250,7 @@ class EduExtractLayer3Synthesizer:
                         "formulas_or_definitions": sec_dict["formulas_or_definitions"]
                     })
                     all_flashcards.extend(sec_dict["flashcards"])
-
-                    # مکث کوتاه بین درخواست‌ها برای رعایت سقف توکن در دقیقه (RPM/TPM)
-                    time.sleep(6)
+                    time.sleep(2)
 
                 pdf_path = self.generate_pdf(vid_id, title, topic, study_sections, all_flashcards)
                 csv_path = self.export_anki_csv(vid_id, all_flashcards)
