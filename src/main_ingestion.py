@@ -16,7 +16,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -298,9 +298,16 @@ class EduExtractIngestionPipeline:
             doc_ref = col_ref.document(vid_id)
             snapshot = doc_ref.get()
 
-            if snapshot.exists and snapshot.to_dict().get("status") in ["INGESTED", "EXTRACTED", "VALIDATED", "SYNCED"]:
-                logger.info(f"[SKIP] Video {vid_id} already processed (status: {snapshot.to_dict().get('status')}).")
-                continue
+            # ==============================================================
+            # SYSTEM STATE LOCK: جلوگیری از تخریب دیتای ویدیوهای پردازش‌شده
+            # ==============================================================
+            if snapshot.exists:
+                current_status = snapshot.to_dict().get("status", "UNKNOWN")
+                # اگر ویدیو در دیتابیس است و وضعیت آن یکی از این موارد باشد، آن را رونویسی نکن
+                if current_status in ["INGESTED", "CLEANED", "SYNTHESIS_FAILED", "COMPLETED"]:
+                    logger.info(f"[STATE LOCK] Skipping '{vid['title']}' ({vid_id}). Already in state: '{current_status}'. Preserving lifecycle.")
+                    continue
+            # ==============================================================
 
             logger.info(f"Extracting transcript for: {vid['title']} ({vid_id})...")
             try:
