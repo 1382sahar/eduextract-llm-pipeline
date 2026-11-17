@@ -18,6 +18,9 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from fpdf import FPDF
 
+# فراخوانی پرامپت‌های ایزوله‌شده
+from prompts import GEMINI_WHOLE_VIDEO_PROMPT, LOCAL_LLM_SYSTEM_PROMPT, LOCAL_LLM_USER_PROMPT
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -74,20 +77,21 @@ class LocalHuggingFaceBackup:
         self._ensure_loaded()
 
         trimmed_text = " ".join(chunk_text.split()[:550])
+        
+        # استفاده از پرامپت‌های جداشده
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are an academic professor. Output ONLY valid JSON matching this exact schema:\n"
-                    '{"section_title": "str", "summary": "120-word explanation", '
-                    '"key_takeaways": ["point 1", "point 2", "point 3"], '
-                    '"formulas_or_definitions": ["formula 1"], '
-                    '"flashcards": [{"front": "question", "back": "answer", "difficulty": "Medium"}]}'
-                )
+                "content": LOCAL_LLM_SYSTEM_PROMPT
             },
             {
                 "role": "user",
-                "content": f"Lecture: {video_title} ({topic}) - Part {chunk_idx + 1}\n\nTranscript:\n{trimmed_text}"
+                "content": LOCAL_LLM_USER_PROMPT.format(
+                    video_title=video_title,
+                    topic=topic,
+                    chunk_idx=chunk_idx + 1,
+                    trimmed_text=trimmed_text
+                )
             }
         ]
 
@@ -224,13 +228,12 @@ class EduExtractLayer3Synthesizer:
             if c.get("text", "").strip()
         )
 
-        prompt = (
-            f"You are an expert university professor creating a complete structured study guide and flashcards "
-            f"for a lecture titled '{video_title}' on the topic '{topic}'.\n"
-            f"Below is the full lecture divided into {len(chunks)} parts. For EACH part, produce one structured section "
-            "with a descriptive title, a clear 150-220 word academic summary, 3-5 key exam takeaways, "
-            "important formulas/definitions, and 4-5 conceptual flashcards.\n\n"
-            f"{combined_transcript}"
+        # استفاده از پرامپت مهندسی‌شده
+        prompt = GEMINI_WHOLE_VIDEO_PROMPT.format(
+            video_title=video_title,
+            topic=topic,
+            chunk_count=len(chunks),
+            combined_transcript=combined_transcript
         )
 
         for attempt in range(1, 3):
