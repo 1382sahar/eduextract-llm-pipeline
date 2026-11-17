@@ -81,7 +81,7 @@ class EduExtractLayer3Synthesizer:
             raise ValueError("Missing GEMINI_API_KEY environment variable!")
 
         self.client = genai.Client(api_key=api_key)
-        self.model = "gemini-2.5-flash"
+        self.model = self._select_active_gemini_model()
         logger.info(f"Initialized Gemini Layer 3 Synthesizer with model: {self.model}")
 
         os.makedirs("artifacts/pdf", exist_ok=True)
@@ -103,6 +103,26 @@ class EduExtractLayer3Synthesizer:
 
         firebase_admin.initialize_app(cred)
         return firestore.client()
+
+    def _select_active_gemini_model(self) -> str:
+        """Selects gemini-3.8-flash or dynamically discovers the latest active Flash model."""
+        try:
+            available = [
+                m.name.replace("models/", "")
+                for m in self.client.models.list()
+                if "flash" in m.name.lower()
+                and "image" not in m.name.lower()
+                and "audio" not in m.name.lower()
+                and "tts" not in m.name.lower()
+            ]
+            logger.info(f"Available Gemini Flash models: {available}")
+            if "gemini-3.8-flash" in available:
+                return "gemini-3.8-flash"
+            if available:
+                return sorted(available, reverse=True)[0]
+        except Exception as e:
+            logger.warning(f"Could not list Gemini models dynamically: {e}")
+        return "gemini-3.8-flash"
 
     def synthesize_chunk(self, chunk_text: str, video_title: str, topic: str, chunk_idx: int) -> ChunkSynthesis:
         prompt = (
