@@ -12,6 +12,7 @@ on:
         required: false
         default: '5'
   schedule:
+    # اجرای خودکار هر روز ساعت ۰۳:۰۰ بامداد UTC
     - cron: '0 3 * * *'
 
 jobs:
@@ -48,16 +49,15 @@ jobs:
           TOP_K_VIDEOS: ${{ github.event.inputs.top_k_videos || '5' }}
         run: python src/main_ingestion.py
 
-      - name: Run Layer 2 - Cleaning, ASR Cache & Semantic Chunking
+      - name: Run Layer 2 - Cleaning, Punctuation & Semantic Chunking
         env:
           FIREBASE_CREDENTIALS_B64: ${{ secrets.FIREBASE_CREDENTIALS_B64 }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python src/main_processing.py
 
       - name: Run Layer 3 - Flashcards & Study Guide PDF Synthesis
         env:
           FIREBASE_CREDENTIALS_B64: ${{ secrets.FIREBASE_CREDENTIALS_B64 }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python src/main_synthesis.py
 
       - name: Upload Generated PDFs & Flashcards
