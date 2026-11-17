@@ -8,7 +8,7 @@ from typing import List, Dict, Any
 
 import firebase_admin
 from firebase_admin import credentials, firestore
-from deepmultilingualpunctuation import PunctuationModel
+from transformers import pipeline
 
 try:
     from groq import Groq
@@ -108,7 +108,7 @@ class EduExtractLayer2Processor:
     1. Fetch INGESTED/READY transcripts from Firestore.
     2. Strip audio artifacts, spoken fillers, and stutters.
     3. Apply cached + self-learning ASR corrections.
-    4. Restore punctuation & sentence capitalization locally via deepmultilingualpunctuation.
+    4. Restore punctuation & sentence capitalization locally via HuggingFace transformers pipeline.
     5. Split into sentence-aware overlapping semantic chunks and update Firestore status to CLEANED.
     """
 
@@ -117,7 +117,11 @@ class EduExtractLayer2Processor:
         self.asr_corrector = SmartASRCorrector(self.db)
 
         logger.info("Loading local punctuation model (oliverguhr/fullstop-punctuation-multilang-large)...")
-        self.punct_model = PunctuationModel(model="oliverguhr/fullstop-punctuation-multilang-large")
+        self.punct_pipe = pipeline(
+            "token-classification",
+            model="oliverguhr/fullstop-punctuation-multilang-large",
+            aggregation_strategy="none"
+        )
 
         fillers = [
             r"uh+", r"um+", r"er+", r"ah+",
@@ -143,17 +147,60 @@ class EduExtractLayer2Processor:
         return firestore.client()
 
     def clean_noise_and_fillers(self, raw_text: str) -> str:
-        # ۱. حذف تگ‌های صوتی مثل [Music] یا [Applause]
         text = re.sub(r"\[.*?\]|\(.*?\)", " ", raw_text)
-        # ۲. حذف کلمات پرکننده
         text = self.filler_pattern.sub("", text)
-        # ۳. حذف لکنت‌های تکراری پشت سر هم (مثل "the the" -> "the")
         text = re.sub(r"\b(\w+)(?:\s+\1\b)+", r"\1", text, flags=re.IGNORECASE)
-        # ۴. نرمال‌سازی فاصله‌ها
         return re.sub(r"\s+", " ", text).strip()
 
+    def _predict_punctuation_chunked(self, text: str, chunk_words: int = 250, overlap_words: int = 20) -> str:
+        """
+        Predicts punctuation labels in overlapping word windows (respecting the 512-token
+        BERT/XLM-R context limit) and reconstructs punctuated text cleanly.
+        """
+        words = text.split()
+        if not words:
+            return ""
+
+        result_words: List[str] = []
+        step = max(1, chunk_words - overlap_words)
+
+        for start in range(0, len(words), step):
+            window_words = words[start:start + chunk_words]
+            window_text = " ".join(window_words)
+            predictions = self.punct_pipe(window_text)
+
+            # نگاشت پیش‌بینی توکن‌ها به کلمات پنجره جاری
+            word_labels = ["0"] * len(window_words)
+            char_spans = []
+            cursor = 0
+            for w in window_words:
+                idx = window_text.find(w, cursor)
+                char_spans.append((idx, idx + len(w)))
+                cursor = idx + len(w)
+
+            for pred in predictions:
+                end_char = pred["end"]
+                label = pred["entity"]
+                for w_idx, (s_c, e_c) in enumerate(char_spans):
+                    if s_c < end_char <= e_c:
+                        word_labels[w_idx] = label
+                        break
+
+            # حذف توکن‌های هم‌پوشان (Overlap) به جز اولین پنجره
+            emit_start = 0 if start == 0 else overlap_words
+            for w_idx in range(emit_start, len(window_words)):
+                w = window_words[w_idx]
+                lbl = word_labels[w_idx]
+                punct = lbl if lbl in {".", ",", "?", "-", ":"} else ""
+                result_words.append(f"{w}{punct}")
+
+            if start + chunk_words >= len(words):
+                break
+
+        return " ".join(result_words)
+
     def restore_punctuation_and_casing(self, text: str) -> str:
-        punctuated = self.punct_model.restore_punctuation(text)
+        punctuated = self._predict_punctuation_chunked(text)
         # بزرگ کردن حرف اول هر جمله بعد از . یا ? یا !
         parts = re.split(r"([.!?]+\s+)", punctuated)
         restored = "".join(
@@ -168,10 +215,6 @@ class EduExtractLayer2Processor:
         target_words: int = 900,
         overlap_sentences: int = 2
     ) -> List[Dict[str, Any]]:
-        """
-        Splits punctuated text along complete sentence boundaries so mathematical
-        and logical explanations are never cut mid-sentence.
-        """
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
         if not sentences:
             return []
@@ -191,7 +234,6 @@ class EduExtractLayer2Processor:
                     "word_count": len(chunk_text.split()),
                     "sentence_count": len(current_sentences)
                 })
-                # حفظ ۲ جمله آخر به عنوان هم‌پوشانی (Overlap) برای حفظ پیوستگی معنایی
                 current_sentences = current_sentences[-overlap_sentences:] if overlap_sentences > 0 else []
                 current_word_count = sum(len(s.split()) for s in current_sentences)
 
@@ -211,7 +253,6 @@ class EduExtractLayer2Processor:
 
     def run(self):
         col_ref = self.db.collection("Pipeline_State")
-        # دریافت ویدیوهایی که لایه ۱ را با موفقیت گذرانده‌اند
         docs = col_ref.where("status", "in", ["INGESTED", "READY"]).stream()
 
         processed_count = 0
@@ -227,19 +268,11 @@ class EduExtractLayer2Processor:
 
             logger.info(f"Processing Layer 2 for: {data.get('title', vid_id)} ({vid_id})...")
             try:
-                # گام ۱: حذف نویزها و کلمات پرکننده
                 denoised_text = self.clean_noise_and_fillers(raw_transcript)
-
-                # گام ۲: اصلاح خطاهای ASR با کش هوشمند + Groq
                 asr_fixed_text = self.asr_corrector.process(denoised_text, topic=topic)
-
-                # گام ۳: نقطه‌گذاری و بزرگ کردن حروف اول جمله
                 cleaned_transcript = self.restore_punctuation_and_casing(asr_fixed_text)
-
-                # گام ۴: چانکینگ معنایی جمله‌محور
                 chunks = self.semantic_sentence_chunker(cleaned_transcript, target_words=900, overlap_sentences=2)
 
-                # گام ۵: ذخیره نتیجه در Firestore و تغییر وضعیت به CLEANED
                 doc.reference.update({
                     "cleaned_transcript": cleaned_transcript,
                     "cleaned_char_count": len(cleaned_transcript),
