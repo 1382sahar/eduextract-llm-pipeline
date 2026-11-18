@@ -11,9 +11,11 @@ on:
         description: 'Number of top videos to ingest'
         required: false
         default: '5'
+  repository_dispatch:
+    types: [trigger-pipeline]
   schedule:
-    # اجرای خودکار هر روز ساعت ۰۳:۰۰ بامداد UTC
-    - cron: '0 3 * * *'
+    # اجرای خودکار هر روز ساعت ۰۸:۳۰ UTC (دقیقا معادل ۱۲:۰۰ ظهر به وقت ایران)
+    - cron: '30 8 * * *'
 
 jobs:
   run-pipeline:
@@ -33,6 +35,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install psutil
 
       - name: Cache HuggingFace Punctuation Model
         uses: actions/cache@v4
@@ -41,20 +44,24 @@ jobs:
           key: ${{ runner.os }}-hf-punctuation-v1
 
       - name: Run Layer 1 - Discovery & Transcript Ingestion
+        continue-on-error: true  # <--- جلوگیری از توقف پایپ‌لاین در صورت ارور
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           FIREBASE_CREDENTIALS_B64: ${{ secrets.FIREBASE_CREDENTIALS_B64 }}
           YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-          TARGET_TOPIC: ${{ github.event.inputs.target_topic || 'Linear Algebra' }}
-          TOP_K_VIDEOS: ${{ github.event.inputs.top_k_videos || '5' }}
+          # دریافت موضوع هم از طریق اجرای دستی و هم از طریق داشبورد وب
+          TARGET_TOPIC: ${{ github.event.client_payload.topic || github.event.inputs.target_topic || '' }}
+          TOP_K_VIDEOS: ${{ github.event.client_payload.count || github.event.inputs.top_k_videos || '' }}
         run: python src/main_ingestion.py
 
       - name: Run Layer 2 - Cleaning, Punctuation & Semantic Chunking
+        continue-on-error: true  # <--- پردازش کارهای نیمه‌تمام قبلی حتی اگر لایه ۱ ارور داد
         env:
           FIREBASE_CREDENTIALS_B64: ${{ secrets.FIREBASE_CREDENTIALS_B64 }}
         run: python src/main_processing.py
 
       - name: Run Layer 3 - Flashcards & Study Guide PDF Synthesis
+        continue-on-error: true  # <--- تلاش مجدد برای ویدیوهای SYNTHESIS_FAILED
         env:
           FIREBASE_CREDENTIALS_B64: ${{ secrets.FIREBASE_CREDENTIALS_B64 }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
