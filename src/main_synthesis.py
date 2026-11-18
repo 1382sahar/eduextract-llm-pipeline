@@ -384,7 +384,11 @@ class EduExtractLayer3Synthesizer:
 
     def run(self):
         col_ref = self.db.collection("Pipeline_State")
-        docs = col_ref.where(filter=FieldFilter("status", "in", ["CLEANED", "SYNTHESIS_FAILED"])).get()
+        # استفاده از .get() به جای .stream() و تبدیل فوری به لیست در حافظه
+        docs = list(col_ref.where("status", "==", "INGESTED").get())
+        logger.info(f"Fetched {len(docs)} documents to process.")
+
+for doc in docs:
 
         synthesized_count = 0
         for doc in docs:
