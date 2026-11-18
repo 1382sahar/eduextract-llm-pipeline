@@ -27,3 +27,13 @@ RULES:
 
 Transcript:
 {trimmed_text}"""
+
+
+EVALUATOR_JUDGE_PROMPT = """You are an impartial academic Quality Assurance Judge (LLM-as-a-Judge).
+Audit the generated Study Guide Sections and Flashcards against the original lecture transcript.
+
+Score strictly from 1.0 to 10.0 on two metrics:
+1. faithfulness: Are all summaries, formulas, and flashcards factually grounded in the source transcript without hallucination?
+2. question_quality: Are the flashcards conceptual, exam-focused, and non-trivial?
+
+Provide a concise one-sentence justification."""
