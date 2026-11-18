@@ -8,13 +8,12 @@ import tempfile
 import subprocess
 from http.cookiejar import MozillaCookieJar
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
 import requests
 import yt_dlp
 import firebase_admin
 from firebase_admin import credentials, firestore
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
@@ -58,26 +57,35 @@ class EduExtractIngestionPipeline:
 
         firebase_admin.initialize_app(cred)
         return firestore.client()
-        
-    def get_dynamic_config(self, default_topic: str = "Linear Algebra", default_k: int = 5) -> Tuple[str, int]:
+
+    def get_remote_config(self) -> tuple[str, int]:
         """
-        دریافت تنظیمات (موضوع و تعداد ویدیو) که کاربر از طریق داشبورد وب در دیتابیس ثبت کرده است
+        Fetches the pipeline configuration requested by the user via the Web Dashboard.
+        Falls back to environment variables if the remote config is missing or invalid.
         """
         try:
-            config_ref = self.db.collection("System").document("PipelineConfig").get()
-            if config_ref.exists:
-                data = config_ref.to_dict()
-                topic = data.get("target_topic", default_topic)
-                # برای امنیت بیشتر، مطمئن می‌شویم تعداد ویدیوها بین 1 تا 10 باشد
-                top_k = min(max(int(data.get("video_count", default_k)), 1), 10)
-                logger.info(f"✅ Loaded config from Web Dashboard: Topic='{topic}', Count={top_k}")
-                return topic, top_k
-            else:
-                logger.info("No dashboard config found. Using default environment variables.")
-        except Exception as e:
-            logger.error(f"Error reading config from Firestore: {e}")
+            config_ref = self.db.collection("System").document("PipelineConfig")
+            snapshot = config_ref.get()
             
-        return default_topic, default_k
+            if snapshot.exists:
+                data = snapshot.to_dict()
+                topic = data.get("target_topic")
+                top_k = data.get("top_k_videos", 5)
+                
+                if topic:
+                    # برای امنیت بیشتر، تعداد ویدیوها را به حداکثر 10 محدود می‌کنیم
+                    top_k = min(max(int(top_k), 1), 10)
+                    logger.info(f"[CONFIG] Loaded config from Web Dashboard -> Topic: '{topic}', Count: {top_k}")
+                    return topic, top_k
+                    
+        except Exception as e:
+            logger.error(f"[CONFIG] Error reading remote config: {e}. Falling back to env vars.")
+            
+        # Fallback to env vars
+        fallback_topic = os.getenv("TARGET_TOPIC", "Linear Algebra")
+        fallback_k = int(os.getenv("TOP_K_VIDEOS", "5"))
+        logger.info(f"[CONFIG] Using fallback env config -> Topic: '{fallback_topic}', Count: {fallback_k}")
+        return fallback_topic, fallback_k
 
     def _prepare_cookie_file(self) -> Optional[str]:
         if not self.cookies_b64 or not self.cookies_b64.strip():
@@ -176,7 +184,10 @@ class EduExtractIngestionPipeline:
         return ranked[:top_k]
 
     def _fetch_ytdlp_python(self, video_id: str) -> str:
-        """Engine 1: yt-dlp Python API with ignore_no_formats_error=True"""
+        """
+        Engine 1: yt-dlp Python API with ignore_no_formats_error=True so it never fails
+        when video streams are restricted on datacenter IPs.
+        """
         url = f"https://www.youtube.com/watch?v={video_id}"
         ydl_opts: Dict[str, Any] = {
             "skip_download": True,
@@ -204,15 +215,18 @@ class EduExtractIngestionPipeline:
             auto_subs = info.get("automatic_captions") or {}
 
             tracks = None
+            # Check manual English subtitles first
             for key in subs:
                 if key == "en" or key.startswith("en-"):
                     tracks = subs[key]
                     break
+            # Then check automatic English captions
             if not tracks:
                 for key in auto_subs:
                     if key == "en" or key.startswith("en-"):
                         tracks = auto_subs[key]
                         break
+            # Fallback to any available subtitle track
             if not tracks:
                 all_tracks = list(subs.values()) + list(auto_subs.values())
                 if all_tracks:
@@ -244,7 +258,10 @@ class EduExtractIngestionPipeline:
             return text
 
     def _fetch_ytdlp_cli_fallback(self, video_id: str) -> str:
-        """Engine 2: Direct CLI execution of yt-dlp writing .vtt subtitle file to disk"""
+        """
+        Engine 2: Direct CLI execution of yt-dlp writing .vtt subtitle file to disk
+        with --ignore-no-formats-error.
+        """
         url = f"https://www.youtube.com/watch?v={video_id}"
         with tempfile.TemporaryDirectory() as tmpdir:
             out_template = os.path.join(tmpdir, "%(id)s.%(ext)s")
@@ -300,15 +317,8 @@ class EduExtractIngestionPipeline:
             logger.warning(f"Engine 1 failed for {video_id} ({type(e1).__name__}: {e1}). Trying Engine 2 (yt-dlp CLI)...")
             return self._fetch_ytdlp_cli_fallback(video_id), "yt-dlp-cli"
 
-    def run(self):
-        # 1. گرفتن تنظیمات به صورت هوشمند از دیتابیس (یا متغیرهای محیطی)
-        env_topic = os.getenv("TARGET_TOPIC", "Linear Algebra")
-        env_top_k = int(os.getenv("TOP_K_VIDEOS", "5"))
-        
-        target_topic, top_k = self.get_dynamic_config(default_topic=env_topic, default_k=env_top_k)
-
-        # 2. جستجوی ویدیوها بر اساس موضوع جدید
-        top_videos = self.discover_top_videos(topic=target_topic, top_k=top_k)
+    def run(self, topic: str, top_k: int = 5):
+        top_videos = self.discover_top_videos(topic=topic, top_k=top_k)
         col_ref = self.db.collection("Pipeline_State")
 
         for vid in top_videos:
@@ -317,12 +327,12 @@ class EduExtractIngestionPipeline:
             snapshot = doc_ref.get()
 
             # ==============================================================
-            # SYSTEM STATE LOCK: جلوگیری از تخریب دیتای ویدیوهای پردازش‌شده
+            # SYSTEM STATE LOCK: جلوگیری از رونویسی ویدیوهای پردازش‌شده
             # ==============================================================
             if snapshot.exists:
                 current_status = snapshot.to_dict().get("status", "UNKNOWN")
-                if current_status in ["INGESTED", "CLEANED", "SYNTHESIS_FAILED", "COMPLETED"]:
-                    logger.info(f"[STATE LOCK] Skipping '{vid['title']}' ({vid_id}). Already in state: '{current_status}'. Preserving lifecycle.")
+                if current_status in ["READY", "INGESTED", "EXTRACTED", "CLEANED", "SYNTHESIS_FAILED", "COMPLETED"]:
+                    logger.info(f"[SKIP] Video {vid_id} already in state: '{current_status}'. Preserving lifecycle.")
                     continue
             # ==============================================================
 
@@ -333,12 +343,12 @@ class EduExtractIngestionPipeline:
                     "transcript": transcript_text,
                     "char_count": len(transcript_text),
                     "ingestion_engine": engine,
-                    "status": "INGESTED",
+                    "status": "READY",  # آماده برای پردازش در لایه دوم
                     "error_log": firestore.DELETE_FIELD,
                     "updated_at": datetime.now(timezone.utc).isoformat()
                 })
                 doc_ref.set(vid, merge=True)
-                logger.info(f"[SUCCESS] Stored {vid_id} ({len(transcript_text):,} chars via {engine}) in Firestore.")
+                logger.info(f"[SUCCESS] Stored {vid_id} ({len(transcript_text):,} chars via {engine}) in Firestore as READY.")
             except Exception as e:
                 logger.error(f"[FAILED] Could not extract transcript for {vid_id}: {e}")
                 vid.update({
@@ -355,8 +365,12 @@ class EduExtractIngestionPipeline:
 
 if __name__ == "__main__":
     pipeline = EduExtractIngestionPipeline()
+    
+    # 1. خواندن موضوع از داشبورد وب
+    target_topic, top_count = pipeline.get_remote_config()
+    
     try:
-        # متد run حالا خودش موضوع را پیدا می‌کند
-        pipeline.run()
+        # 2. اجرای استخراج
+        pipeline.run(topic=target_topic, top_k=top_count)
     finally:
         pipeline.cleanup()

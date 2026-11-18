@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EduExtract | Interactive Study Dashboard</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- FontAwesome & Google Fonts -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Custom Tailwind Configuration -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'sans-serif'] },
+                    colors: {
+                        primary: '#b22222', // Firebrick / Crimson
+                        secondary: '#404040', // Dark Gray
+                        accent: '#f0f0f0' // Light Gray
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Custom CSS for 3D Flashcard Flip & Scrollbar -->
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        
+        /* 3D Flip Card Styles */
+        .flip-card {
+            perspective: 1000px;
+            cursor: pointer;
+        }
+        .flip-card-inner {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            transition: transform 0.6s cubic-bezier(0.4, 0.2, 0.2, 1);
+            transform-style: preserve-3d;
+        }
+        .flip-card.flipped .flip-card-inner {
+            transform: rotateY(180deg);
+        }
+        .flip-card-front, .flip-card-back {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            backface-visibility: hidden;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 1.5rem;
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        .flip-card-front {
+            background-color: white;
+            border-top: 4px solid #b22222;
+        }
+        .flip-card-back {
+            background-color: #f9fafb;
+            transform: rotateY(180deg);
+            border-top: 4px solid #404040;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="bg-gray-100 h-screen flex overflow-hidden">
+
+    <!-- Sidebar: Video List -->
+    <aside class="w-80 bg-white border-r border-gray-200 flex flex-col h-full z-10 shadow-sm">
+        <div class="p-6 border-b border-gray-200">
+            <h1 class="text-2xl font-bold text-primary flex items-center gap-2">
+                <i class="fa-solid fa-graduation-cap"></i> EduExtract
+            </h1>
+            <p class="text-sm text-gray-500 mt-1">AI Study Pipeline Monitor</p>
+        </div>
+        
+        <div class="p-4 bg-gray-50 border-b border-gray-200 flex justify-between items-center">
+            <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wider">Processed Videos</h2>
+            <span id="video-count" class="bg-primary text-white text-xs py-0.5 px-2 rounded-full shadow-sm">0</span>
+        </div>
+
+        <!-- Search / Request New Topic Button -->
+        <div class="p-3 border-b border-gray-200 bg-white">
+            <button id="btn-open-search" class="w-full bg-red-50 hover:bg-red-100 text-primary font-semibold py-2 px-4 rounded-lg border border-red-200 transition-colors text-sm flex items-center justify-center gap-2 shadow-sm">
+                <i class="fa-solid fa-magnifying-glass"></i> Request New Topic
+            </button>
+        </div>
+
+        <div id="video-list" class="flex-1 overflow-y-auto p-3 space-y-2">
+            <!-- Loading Indicator -->
+            <div id="loading-indicator" class="text-center py-10 text-gray-400">
+                <i class="fa-solid fa-circle-notch fa-spin text-3xl mb-3 text-primary"></i>
+                <p class="text-sm font-medium">Connecting to Firestore...</p>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="flex-1 flex flex-col h-full relative overflow-hidden bg-gray-50">
+        
+        <!-- Empty State (Shown when no video is selected) -->
+        <div id="empty-state" class="absolute inset-0 flex flex-col items-center justify-center text-gray-400 z-0 bg-gray-50">
+            <div class="bg-white p-8 rounded-full shadow-sm mb-6">
+                <i class="fa-solid fa-book-open text-6xl text-gray-300"></i>
+            </div>
+            <h2 class="text-2xl font-semibold text-gray-600">Welcome to EduExtract</h2>
+            <p class="text-base mt-2 max-w-md text-center text-gray-500">Select a completed video from the sidebar to view your generated study guides and AI flashcards.</p>
+        </div>
+
+        <!-- Content State -->
+        <div id="content-area" class="hidden flex-col h-full z-10">
+            
+            <!-- Header -->
+            <header class="bg-white px-8 py-6 shadow-sm border-b border-gray-200 z-20">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <span id="active-topic" class="text-xs font-bold text-primary uppercase tracking-wider bg-red-50 border border-red-100 px-2 py-1 rounded">Topic</span>
+                        <h2 id="active-title" class="text-2xl font-bold text-secondary mt-3 leading-tight">Video Title</h2>
+                        <div class="flex items-center gap-4 mt-3 text-sm text-gray-500">
+                            <span id="active-date" class="flex items-center bg-gray-50 px-2 py-1 rounded border border-gray-100"><i class="fa-regular fa-calendar mr-2"></i> Date</span>
+                            <span id="active-model" class="flex items-center bg-gray-50 px-2 py-1 rounded border border-gray-100"><i class="fa-solid fa-microchip mr-2 text-primary"></i> Model</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tabs -->
+                <div class="flex space-x-8 mt-6 border-b border-gray-200">
+                    <button id="tab-flashcards" class="pb-3 text-sm font-semibold border-b-2 border-primary text-primary transition-colors flex items-center">
+                        <i class="fa-regular fa-clone mr-2"></i> AI Flashcards
+                    </button>
+                    <button id="tab-guide" class="pb-3 text-sm font-semibold border-b-2 border-transparent text-gray-500 hover:text-gray-800 transition-colors flex items-center">
+                        <i class="fa-solid fa-list-ul mr-2"></i> Comprehensive Guide
+                    </button>
+                </div>
+            </header>
+
+            <!-- Scrollable Viewport -->
+            <div class="flex-1 overflow-y-auto p-8 relative">
+                
+                <!-- Flashcards View -->
+                <div id="view-flashcards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-7xl mx-auto">
+                    <!-- Cards injected here via JS -->
+                </div>
+
+                <!-- Study Guide View -->
+                <div id="view-guide" class="hidden max-w-4xl mx-auto space-y-6 pb-12">
+                    <!-- Sections injected here via JS -->
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- General Message Modal -->
+    <div id="msg-modal" class="fixed inset-0 bg-black bg-opacity-60 hidden items-center justify-center z-50 backdrop-blur-sm">
+        <div class="bg-white rounded-xl p-6 max-w-md w-full shadow-2xl transform transition-transform">
+            <h3 id="msg-title" class="text-xl font-bold text-secondary mb-3 flex items-center gap-2">
+                <i class="fa-solid fa-circle-info text-primary"></i> Message
+            </h3>
+            <p id="msg-desc" class="text-gray-600 mb-6 text-sm leading-relaxed whitespace-pre-wrap"></p>
+            <div class="text-right">
+                <button id="close-msg-btn" class="bg-primary text-white px-5 py-2.5 rounded-lg font-medium text-sm hover:bg-red-800 transition-colors shadow-md">Got it</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Search / Config Modal -->
+    <div id="search-modal" class="fixed inset-0 bg-black bg-opacity-60 hidden items-center justify-center z-50 backdrop-blur-sm transition-opacity">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden transform scale-100 transition-transform">
+            <div class="bg-primary px-6 py-4 flex justify-between items-center">
+                <h3 class="text-lg font-bold text-white flex items-center">
+                    <i class="fa-solid fa-cloud-arrow-down mr-3"></i> Configure Extraction
+                </h3>
+                <button id="btn-close-search-top" class="text-red-200 hover:text-white transition-colors">
+                    <i class="fa-solid fa-xmark text-xl"></i>
+                </button>
+            </div>
+            
+            <form id="search-form" class="p-6 space-y-5">
+                <div>
+                    <label for="topic-input" class="block text-sm font-bold text-gray-700 mb-1">Target Topic</label>
+                    <input type="text" id="topic-input" placeholder="e.g., Quantum Physics, Calculus..." required
+                           class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-shadow bg-gray-50">
+                </div>
+                
+                <div>
+                    <label for="count-input" class="block text-sm font-bold text-gray-700 mb-1">Number of Videos</label>
+                    <input type="number" id="count-input" min="1" max="10" value="5" required
+                           class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-shadow bg-gray-50">
+                    <p class="text-xs text-gray-500 mt-2"><i class="fa-solid fa-circle-info mr-1 text-primary"></i> Maximum 10 videos per run to conserve API quota.</p>
+                </div>
+
+                <div class="pt-4 flex gap-3">
+                    <button type="button" id="btn-close-search-bottom" class="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 transition-colors">Cancel</button>
+                    <button type="submit" id="submit-search-btn" class="flex-1 px-4 py-2.5 bg-primary text-white rounded-lg font-bold hover:bg-red-800 transition-colors flex justify-center items-center gap-2 shadow-md">
+                        Save Config
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Firebase SDK (Modular) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, collection, query, getDocs, doc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Your specific Firebase configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyCcNsOTxaUC6NVBi6vuwJATVEEPn-zq6g0",
+            authDomain: "resome-7ce80.firebaseapp.com",
+            projectId: "resome-7ce80",
+            storageBucket: "resome-7ce80.firebasestorage.app",
+            messagingSenderId: "279753299824",
+            appId: "1:279753299824:web:340459d03b6565204561b5",
+            measurementId: "G-JYDNHQG5VE"
+        };
+
+        let db;
+        let allVideos = [];
+        let currentVideo = null;
+
+        // --- Core Initialization ---
+        function initApp() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                fetchAllVideos();
+            } catch (error) {
+                console.error("Firebase Init Error:", error);
+                showMsgModal("Connection Error", "Could not connect to Firebase. Check console for details.");
+            }
+        }
+
+        // --- Data Fetching & Caching (Stale-while-revalidate) ---
+        async function fetchAllVideos() {
+            const videoList = document.getElementById('video-list');
+            
+            // 1. Instant load from localStorage cache
+            const cachedData = localStorage.getItem('eduExtract_videos_v2');
+            if (cachedData) {
+                console.log("⚡ Loading from local cache...");
+                allVideos = JSON.parse(cachedData);
+                document.getElementById('video-count').textContent = allVideos.length;
+                renderSidebar();
+                
+                // Select first video if none is selected
+                if (allVideos.length > 0 && !currentVideo) {
+                    selectVideo(allVideos[0].id);
+                }
+            }
+
+            // 2. Fetch fresh data in the background
+            try {
+                const q = query(collection(db, "Pipeline_State"));
+                const querySnapshot = await getDocs(q);
+                
+                const freshVideos = [];
+                querySnapshot.forEach((doc) => {
+                    freshVideos.push({ id: doc.id, ...doc.data() });
+                });
+
+                // Sort newest first
+                freshVideos.sort((a, b) => {
+                    const dateA = new Date(a.updated_at || a.ingested_at || 0);
+                    const dateB = new Date(b.updated_at || b.ingested_at || 0);
+                    return dateB - dateA;
+                });
+
+                if (freshVideos.length === 0) {
+                    if (!cachedData) {
+                        videoList.innerHTML = '<div class="text-center py-10"><i class="fa-solid fa-box-open text-3xl text-gray-300 mb-2"></i><p class="text-gray-500 text-sm">No videos found in database.</p></div>';
+                    }
+                    return;
+                }
+
+                // 3. Update cache & UI
+                localStorage.setItem('eduExtract_videos_v2', JSON.stringify(freshVideos));
+                allVideos = freshVideos;
+                document.getElementById('video-count').textContent = allVideos.length;
+                renderSidebar();
+                
+                // Update currently viewed video if data changed
+                if (!currentVideo && allVideos.length > 0) {
+                    selectVideo(allVideos[0].id);
+                } else if (currentVideo) {
+                    const updatedCurrent = allVideos.find(v => v.id === currentVideo.id);
+                    if(updatedCurrent) {
+                        currentVideo = updatedCurrent;
+                        // Silently refresh content if it's already open
+                        if (document.getElementById('content-area').classList.contains('flex')) {
+                            selectVideo(currentVideo.id);
+                        }
+                    }
+                }
+
+            } catch (error) {
+                console.error("Error fetching documents: ", error);
+                if (!cachedData) {
+                    videoList.innerHTML = `<div class="text-center py-10 bg-red-50 rounded-lg mx-2"><p class="text-red-500 text-sm font-bold"><i class="fa-solid fa-triangle-exclamation mr-1"></i> Connection Error</p><p class="text-xs text-red-400 mt-1">${error.message}</p></div>`;
+                }
+            }
+        }
+
+        // --- Sidebar Rendering ---
+        function renderSidebar() {
+            const listEl = document.getElementById('video-list');
+            listEl.innerHTML = ''; 
+
+            allVideos.forEach(vid => {
+                const item = document.createElement('div');
+                const isSelected = currentVideo?.id === vid.id;
+                
+                item.className = `p-3 mb-2 rounded-xl cursor-pointer transition-all border-2 shadow-sm ${isSelected ? 'bg-red-50 border-red-200' : 'bg-white border-transparent hover:border-gray-200 hover:shadow-md'}`;
+                item.dataset.id = vid.id;
+                
+                const title = vid.title || vid.id;
+                const status = vid.status || 'UNKNOWN';
+                
+                let statusColor = 'bg-gray-100 text-gray-600 border-gray-200';
+                let statusIcon = 'fa-circle-question';
+                if (status === 'COMPLETED') { statusColor = 'bg-green-50 text-green-700 border-green-200'; statusIcon = 'fa-check-circle'; }
+                else if (status.includes('FAILED')) { statusColor = 'bg-red-50 text-red-700 border-red-200'; statusIcon = 'fa-triangle-exclamation'; }
+                else { statusColor = 'bg-yellow-50 text-yellow-700 border-yellow-200'; statusIcon = 'fa-spinner fa-spin'; }
+
+                item.innerHTML = `
+                    <h3 class="text-sm font-bold text-gray-800 line-clamp-2 leading-tight">${title}</h3>
+                    <div class="flex items-center justify-between mt-3">
+                        <span class="text-[10px] font-bold px-2 py-0.5 rounded border uppercase flex items-center gap-1 ${statusColor}">
+                            <i class="fa-solid ${statusIcon}"></i> ${status}
+                        </span>
+                        ${vid.flashcards ? `<span class="text-[10px] font-bold text-primary bg-white px-2 py-0.5 rounded border border-red-100 shadow-sm"><i class="fa-regular fa-clone mr-1"></i>${vid.flashcards.length}</span>` : ''}
+                    </div>
+                `;
+                
+                // Event listener added via JS for strict CSP compliance
+                item.addEventListener('click', () => selectVideo(vid.id));
+                listEl.appendChild(item);
+            });
+        }
+
+        // --- Main Content Logic ---
+        window.selectVideo = function(id) {
+            currentVideo = allVideos.find(v => v.id === id);
+            
+            // Highlight active in sidebar
+            document.querySelectorAll('#video-list > div').forEach(el => {
+                if (el.dataset.id === id) {
+                    el.classList.add('bg-red-50', 'border-red-200');
+                    el.classList.remove('bg-white', 'border-transparent');
+                } else {
+                    el.classList.remove('bg-red-50', 'border-red-200');
+                    el.classList.add('bg-white', 'border-transparent');
+                }
+            });
+            
+            document.getElementById('empty-state').classList.add('hidden');
+            document.getElementById('content-area').classList.remove('hidden');
+            document.getElementById('content-area').classList.add('flex');
+
+            document.getElementById('active-topic').textContent = currentVideo.topic || 'General';
+            document.getElementById('active-title').textContent = currentVideo.title || currentVideo.id;
+            
+            const dateStr = currentVideo.completed_at ? new Date(currentVideo.completed_at).toLocaleDateString() : 'Pending Processing';
+            document.getElementById('active-date').innerHTML = `<i class="fa-regular fa-calendar text-gray-400 mr-2"></i> <span class="font-medium">${dateStr}</span>`;
+            
+            const modelName = currentVideo.llm_model_used ? currentVideo.llm_model_used.replace('models/', '') : 'N/A';
+            document.getElementById('active-model').innerHTML = `<i class="fa-solid fa-microchip text-primary mr-2"></i> <span class="font-medium">${modelName}</span>`;
+
+            renderFlashcards();
+            renderStudyGuide();
+            
+            // Force reset to flashcards view
+            switchTab('flashcards');
+        }
+
+        function renderFlashcards() {
+            const container = document.getElementById('view-flashcards');
+            container.innerHTML = '';
+            
+            const cards = currentVideo.flashcards || [];
+            
+            if(cards.length === 0) {
+                container.innerHTML = `
+                    <div class="col-span-full flex flex-col items-center justify-center py-20 text-gray-400">
+                        <i class="fa-solid fa-layer-group text-5xl mb-4 text-gray-300"></i>
+                        <p class="text-lg font-medium">No Flashcards Yet</p>
+                        <p class="text-sm mt-1">If the video is still processing, check back later.</p>
+                    </div>`;
+                return;
+            }
+
+            cards.forEach((card, index) => {
+                const diffLabel = card.difficulty || 'Medium';
+                const diffColor = diffLabel.toLowerCase() === 'hard' ? 'text-red-700 bg-red-100 border-red-200' : 
+                                 diffLabel.toLowerCase() === 'easy' ? 'text-green-700 bg-green-100 border-green-200' : 
+                                 'text-yellow-700 bg-yellow-100 border-yellow-200';
+
+                const cardHTML = `
+                    <div class="flip-card h-72 w-full group">
+                        <div class="flip-card-inner">
+                            <!-- Front (Question) -->
+                            <div class="flip-card-front text-center group-hover:shadow-xl transition-shadow">
+                                <span class="absolute top-4 right-4 text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded border shadow-sm ${diffColor}">${diffLabel}</span>
+                                <span class="absolute top-4 left-4 text-sm font-black text-gray-200">Q${index + 1}</span>
+                                <p class="text-secondary font-semibold text-lg px-4 leading-relaxed">${card.front}</p>
+                                <div class="absolute bottom-4 text-[10px] uppercase font-bold text-gray-400 tracking-widest bg-gray-50 px-3 py-1 rounded-full border border-gray-100">
+                                    <i class="fa-solid fa-rotate mr-1"></i> Flip to Reveal
+                                </div>
+                            </div>
+                            <!-- Back (Answer) -->
+                            <div class="flip-card-back text-center overflow-y-auto">
+                                <span class="absolute top-4 left-4 text-sm font-black text-gray-300"><i class="fa-solid fa-lightbulb text-yellow-400 mr-1"></i> Answer</span>
+                                <p class="text-secondary text-base px-4 leading-relaxed mt-4 font-medium">${card.back}</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                container.insertAdjacentHTML('beforeend', cardHTML);
+            });
+        }
+
+        function renderStudyGuide() {
+            const container = document.getElementById('view-guide');
+            container.innerHTML = '';
+
+            const sections = currentVideo.study_guide_sections || [];
+            if(sections.length === 0) {
+                container.innerHTML = `
+                    <div class="flex flex-col items-center justify-center py-20 text-gray-400">
+                        <i class="fa-solid fa-file-lines text-5xl mb-4 text-gray-300"></i>
+                        <p class="text-lg font-medium">Study Guide is Empty</p>
+                    </div>`;
+                return;
+            }
+
+            sections.forEach((sec, index) => {
+                let takeawaysHTML = '';
+                if(sec.key_takeaways && sec.key_takeaways.length > 0) {
+                    takeawaysHTML = `
+                        <div class="mt-5 bg-red-50 p-5 rounded-xl border border-red-100">
+                            <h4 class="text-xs font-bold text-primary mb-3 uppercase tracking-wider flex items-center">
+                                <i class="fa-solid fa-bolt mr-2"></i> Key Takeaways
+                            </h4>
+                            <ul class="space-y-2 text-sm text-gray-700">
+                                ${sec.key_takeaways.map(t => `<li class="flex items-start"><i class="fa-solid fa-check text-green-500 mt-1 mr-2 text-xs"></i><span class="leading-relaxed">${t}</span></li>`).join('')}
+                            </ul>
+                        </div>
+                    `;
+                }
+
+                let formulasHTML = '';
+                if(sec.formulas_or_definitions && sec.formulas_or_definitions.length > 0) {
+                    formulasHTML = `
+                        <div class="mt-4 bg-gray-50 p-5 rounded-xl border border-gray-200">
+                            <h4 class="text-xs font-bold text-secondary mb-3 uppercase tracking-wider flex items-center">
+                                <i class="fa-solid fa-square-root-variable mr-2"></i> Formulas & Definitions
+                            </h4>
+                            <ul class="space-y-2 text-sm font-mono text-gray-800">
+                                ${sec.formulas_or_definitions.map(f => `<li class="bg-white px-3 py-2 border border-gray-200 rounded shadow-sm"><span class="text-primary font-bold mr-2">&rsaquo;</span>${f}</li>`).join('')}
+                            </ul>
+                        </div>
+                    `;
+                }
+
+                const sectionHTML = `
+                    <div class="bg-white p-8 rounded-2xl shadow-sm border border-gray-200 relative overflow-hidden group hover:shadow-md transition-shadow">
+                        <div class="absolute top-0 left-0 w-1.5 h-full bg-primary opacity-80"></div>
+                        <h3 class="text-xl font-bold text-secondary mb-4 flex items-center gap-3">
+                            <span class="bg-gray-100 text-gray-500 rounded-lg w-8 h-8 flex items-center justify-center text-sm font-black">${index + 1}</span>
+                            ${sec.section_title || 'Section Overview'}
+                        </h3>
+                        <p class="text-gray-600 leading-relaxed text-base">${sec.summary || ''}</p>
+                        ${takeawaysHTML}
+                        ${formulasHTML}
+                    </div>
+                `;
+                container.insertAdjacentHTML('beforeend', sectionHTML);
+            });
+        }
+
+        window.switchTab = function(tabName) {
+            const btnFlash = document.getElementById('tab-flashcards');
+            const btnGuide = document.getElementById('tab-guide');
+            const viewFlash = document.getElementById('view-flashcards');
+            const viewGuide = document.getElementById('view-guide');
+
+            const activeStyle = "pb-3 text-sm font-bold border-b-2 border-primary text-primary transition-colors flex items-center";
+            const inactiveStyle = "pb-3 text-sm font-semibold border-b-2 border-transparent text-gray-500 hover:text-gray-800 transition-colors flex items-center";
+
+            if(tabName === 'flashcards') {
+                btnFlash.className = activeStyle;
+                btnGuide.className = inactiveStyle;
+                viewFlash.classList.remove('hidden');
+                viewGuide.classList.add('hidden');
+            } else {
+                btnGuide.className = activeStyle;
+                btnFlash.className = inactiveStyle;
+                viewGuide.classList.remove('hidden');
+                viewFlash.classList.add('hidden');
+            }
+        }
+
+        // --- Search / Config Modal ---
+        window.openSearchModal = function() {
+            const modal = document.getElementById('search-modal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            setTimeout(() => document.getElementById('topic-input').focus(), 50);
+        }
+
+        window.closeSearchModal = function() {
+            const modal = document.getElementById('search-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            document.getElementById('search-form').reset();
+        }
+
+        window.submitSearchConfig = async function(e) {
+            e.preventDefault();
+            const btn = document.getElementById('submit-search-btn');
+            const originalContent = btn.innerHTML;
+            
+            const topic = document.getElementById('topic-input').value.trim();
+            const count = parseInt(document.getElementById('count-input').value, 10);
+            
+            if(!topic || isNaN(count)) return;
+
+            try {
+                btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Saving...';
+                btn.disabled = true;
+
+                // Save to Firestore (Requires updated Rules)
+                const configRef = doc(db, "System", "PipelineConfig");
+                await setDoc(configRef, {
+                    target_topic: topic,
+                    top_k_videos: count,
+                    updated_by: "Web Dashboard",
+                    updated_at: new Date().toISOString()
+                });
+
+                closeSearchModal();
+                showMsgModal("Configuration Saved!", `Successfully queued pipeline to fetch ${count} videos for:\n\n"${topic}"\n\nPlease go to GitHub and run your workflow to start the automated extraction and generation process.`);
+                
+            } catch (error) {
+                console.error("Config save error:", error);
+                if (error.code === 'permission-denied') {
+                    showMsgModal("Permission Error", "Write access is denied by Firestore Security Rules.\n\nPlease ensure your rules allow write access to the /System/PipelineConfig path.");
+                } else {
+                    showMsgModal("Error", "Could not save configuration: " + error.message);
+                }
+            } finally {
+                btn.innerHTML = originalContent;
+                btn.disabled = false;
+            }
+        }
+
+        // --- Utility Modals ---
+        window.showMsgModal = function(title, desc) {
+            document.getElementById('msg-title').innerHTML = `<i class="fa-solid fa-circle-info text-primary"></i> ${title}`;
+            document.getElementById('msg-desc').textContent = desc;
+            document.getElementById('msg-modal').classList.remove('hidden');
+            document.getElementById('msg-modal').classList.add('flex');
+        }
+        
+        window.closeMsgModal = function() {
+            document.getElementById('msg-modal').classList.add('hidden');
+            document.getElementById('msg-modal').classList.remove('flex');
+        }
+
+        // --- Event Listeners (Strict CSP Fix) ---
+        function setupEventListeners() {
+            // Tab switching
+            document.getElementById('tab-flashcards').addEventListener('click', () => switchTab('flashcards'));
+            document.getElementById('tab-guide').addEventListener('click', () => switchTab('guide'));
+            
+            // Modals
+            document.getElementById('close-msg-btn').addEventListener('click', closeMsgModal);
+            document.getElementById('btn-open-search').addEventListener('click', openSearchModal);
+            document.getElementById('btn-close-search-top').addEventListener('click', closeSearchModal);
+            document.getElementById('btn-close-search-bottom').addEventListener('click', closeSearchModal);
+            
+            // Form Submit
+            document.getElementById('search-form').addEventListener('submit', submitSearchConfig);
+            
+            // Event delegation for 3D flip cards
+            document.getElementById('view-flashcards').addEventListener('click', (e) => {
+                const card = e.target.closest('.flip-card');
+                if (card) {
+                    card.classList.toggle('flipped');
+                }
+            });
+        }
+
+        // --- Boot Sequence ---
+        window.addEventListener('DOMContentLoaded', () => {
+            setupEventListeners();
+            initApp();
+        });
+    </script>
+</body>
+</html>
