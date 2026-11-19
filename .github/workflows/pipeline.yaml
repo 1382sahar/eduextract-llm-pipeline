@@ -14,7 +14,7 @@ on:
   repository_dispatch:
     types: [trigger-pipeline]
   schedule:
-    # اجرای خودکار هر روز ساعت ۰۸:۳۰ UTC (دقیقا معادل ۱۲:۰۰ ظهر به وقت ایران)
+    # اجرای خودکار هر روز ساعت ۰۸:۳۰ UTC (معادل ۱۲:۰۰ ظهر به وقت ایران)
     - cron: '30 8 * * *'
 
 jobs:
@@ -35,7 +35,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install psutil
+          pip install psutil qdrant-client
 
       - name: Cache HuggingFace Punctuation Model
         uses: actions/cache@v4
@@ -44,30 +44,36 @@ jobs:
           key: ${{ runner.os }}-hf-punctuation-v1
 
       - name: Run Layer 1 - Discovery & Transcript Ingestion
-        continue-on-error: true  # <--- جلوگیری از توقف پایپ‌لاین در صورت ارور
+        continue-on-error: true
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           FIREBASE_CREDENTIALS_B64: ${{ secrets.FIREBASE_CREDENTIALS_B64 }}
           YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-          # دریافت موضوع هم از طریق اجرای دستی و هم از طریق داشبورد وب
           TARGET_TOPIC: ${{ github.event.client_payload.topic || github.event.inputs.target_topic || '' }}
           TOP_K_VIDEOS: ${{ github.event.client_payload.count || github.event.inputs.top_k_videos || '' }}
         run: python src/main_ingestion.py
 
       - name: Run Layer 2 - Cleaning, Punctuation & Semantic Chunking
-        continue-on-error: true  # <--- پردازش کارهای نیمه‌تمام قبلی حتی اگر لایه ۱ ارور داد
+        continue-on-error: true
         env:
           FIREBASE_CREDENTIALS_B64: ${{ secrets.FIREBASE_CREDENTIALS_B64 }}
         run: python src/main_processing.py
 
       - name: Run Layer 3 - Flashcards & Study Guide PDF Synthesis
-        continue-on-error: true  # <--- تلاش مجدد برای ویدیوهای SYNTHESIS_FAILED
+        continue-on-error: true
         env:
           FIREBASE_CREDENTIALS_B64: ${{ secrets.FIREBASE_CREDENTIALS_B64 }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python src/main_synthesis.py
 
-      - name: Upload Generated PDFs & Flashcards
+      - name: Run Layer 4 - RAG Vector Indexing (Qdrant + Firestore)
+        continue-on-error: true
+        env:
+          FIREBASE_CREDENTIALS_B64: ${{ secrets.FIREBASE_CREDENTIALS_B64 }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python src/main_rag_indexer.py
+
+      - name: Upload Generated PDFs, Flashcards & Vector DB
         uses: actions/upload-artifact@v4
         if: always()
         with:
