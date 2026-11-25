@@ -1,21 +1,21 @@
-requests>=2.31.0
+requests
 
-yt-dlp>=2024.10.0
+yt-dlp
 
-google-genai>=0.8.0
+google-genai
 
-pydantic>=2.7.0
+pydantic
 
-transformers>=4.44.0
+transformers
 
-torch>=2.3.0
+torch
 
-sentencepiece>=0.2.0
+sentencepiece
 
-fpdf2>=2.7.9
+fpdf2
 
-psutil>=6.0.0
+groq
 
-qdrant-client>=1.11.0
+psutil
 
-groq>=0.11.0
+qdrant-client
