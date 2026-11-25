@@ -3,613 +3,1649 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EduExtract | Interactive Study Dashboard</title>
-    
+    <title>EduExtract | 3D AI Brain, Cloudflare D1 Edge RAG & Telemetry</title>
+
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    
-    <!-- FontAwesome & Google Fonts -->
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
-    <!-- Custom Tailwind Configuration -->
+    <!-- Fonts: Inter (English) + Vazirmatn (Persian RTL support) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+    <!-- Three.js 3D Engine -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
     <script>
         tailwind.config = {
             theme: {
                 extend: {
-                    fontFamily: { sans: ['Inter', 'sans-serif'] },
-                    colors: {
-                        primary: '#b22222', // Firebrick / Crimson
-                        secondary: '#404040', // Dark Gray
-                        accent: '#f0f0f0' // Light Gray
+                    fontFamily: {
+                        sans: ['Inter', 'Vazirmatn', 'system-ui', 'sans-serif'],
                     }
                 }
             }
-        }
+        };
     </script>
 
-    <!-- Custom CSS for 3D Flashcard Flip & Scrollbar -->
     <style>
-        body { font-family: 'Inter', sans-serif; }
-        
-        /* 3D Flip Card Styles */
-        .flip-card {
-            perspective: 1000px;
-            cursor: pointer;
-        }
-        .flip-card-inner {
-            position: relative;
-            width: 100%;
-            height: 100%;
-            transition: transform 0.6s cubic-bezier(0.4, 0.2, 0.2, 1);
-            transform-style: preserve-3d;
-        }
-        .flip-card.flipped .flip-card-inner {
-            transform: rotateY(180deg);
-        }
-        .flip-card-front, .flip-card-back {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            backface-visibility: hidden;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            padding: 1.5rem;
-            border-radius: 0.75rem;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        }
-        .flip-card-front {
-            background-color: white;
-            border-top: 4px solid #b22222;
-        }
-        .flip-card-back {
-            background-color: #f9fafb;
-            transform: rotateY(180deg);
-            border-top: 4px solid #404040;
+        html, body {
+            background-color: #020617;
+            overscroll-behavior: none;
         }
 
-        /* Custom Scrollbar */
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .glass-panel {
+            background: rgba(9, 14, 30, 0.60);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+        }
+        .glass-card {
+            background: rgba(18, 27, 50, 0.52);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+
+        .perspective-1000 { perspective: 1000px; }
+        .transform-style-3d {
+            transform-style: preserve-3d;
+            transition: transform 0.6s cubic-bezier(0.4, 0.2, 0.2, 1);
+        }
+        .rotate-y-180 { transform: rotateY(180deg); }
+        .backface-hidden { backface-visibility: hidden; }
+
+        .ui-transition {
+            transition: opacity 0.45s cubic-bezier(0.4, 0, 0.2, 1), transform 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        body.showcase-3d #sidebar {
+            opacity: 0;
+            pointer-events: none;
+            transform: translateX(-28px);
+        }
+        body.showcase-3d main {
+            opacity: 0;
+            pointer-events: none;
+            transform: scale(0.98);
+        }
+        body.showcase-3d #bg-canvas {
+            pointer-events: auto;
+            cursor: grab;
+        }
+        body.showcase-3d #bg-canvas:active {
+            cursor: grabbing;
+        }
+
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+
+        .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scroll::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.3); }
+        .custom-scroll::-webkit-scrollbar-thumb { background: rgba(99, 102, 241, 0.35); border-radius: 9999px; }
+        .custom-scroll::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, 0.6); }
     </style>
 </head>
-<body class="bg-gray-100 h-screen flex overflow-hidden">
+<body class="bg-slate-950 text-slate-100 h-screen w-screen overflow-hidden flex font-sans relative selection:bg-indigo-500/40 selection:text-white">
 
-    <!-- Sidebar: Video List -->
-    <aside class="w-80 bg-white border-r border-gray-200 flex flex-col h-full z-10 shadow-sm">
-        <div class="p-6 border-b border-gray-200">
-            <h1 class="text-2xl font-bold text-primary flex items-center gap-2">
-                <i class="fa-solid fa-graduation-cap"></i> EduExtract
-            </h1>
-            <p class="text-sm text-gray-500 mt-1">AI Study Pipeline Monitor</p>
-        </div>
-        
-        <div class="p-4 bg-gray-50 border-b border-gray-200 flex justify-between items-center">
-            <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wider">Processed Videos</h2>
-            <span id="video-count" class="bg-primary text-white text-xs py-0.5 px-2 rounded-full shadow-sm">0</span>
-        </div>
+    <!-- 3D AI Brain & Cosmic Starfield Background Canvas -->
+    <canvas id="bg-canvas" class="fixed inset-0 w-full h-full z-0 pointer-events-none"></canvas>
 
-        <!-- Search / Request New Topic Button -->
-        <div class="p-3 border-b border-gray-200 bg-white">
-            <button id="btn-open-search" class="w-full bg-red-50 hover:bg-red-100 text-primary font-semibold py-2 px-4 rounded-lg border border-red-200 transition-colors text-sm flex items-center justify-center gap-2 shadow-sm">
-                <i class="fa-solid fa-magnifying-glass"></i> Request New Topic
-            </button>
-        </div>
+    <!-- Floating HUD Controls for Interactive 3D AI Brain Mode -->
+    <div id="hud-3d-controls" class="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 hidden items-center gap-2.5 px-4 py-2.5 rounded-2xl glass-panel border border-cyan-400/35 shadow-2xl shadow-indigo-950/60">
+        <span class="hidden sm:inline-flex items-center gap-2 text-xs font-mono text-cyan-300 pr-2 border-r border-slate-700/80">
+            <i class="fa-solid fa-hand-pointer animate-pulse"></i> Drag to Orbit &bull; Scroll to Zoom
+        </span>
+        <button id="btn-fire-synapse" class="bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white text-xs font-semibold px-3.5 py-2 rounded-xl transition-all flex items-center gap-1.5 shadow-lg">
+            <i class="fa-solid fa-bolt"></i> Neural Pulse
+        </button>
+        <button id="btn-reset-camera" class="bg-slate-800/90 hover:bg-slate-700 text-slate-200 border border-slate-600 text-xs font-medium px-3 py-2 rounded-xl transition-colors flex items-center gap-1.5">
+            <i class="fa-solid fa-rotate-left"></i> Reset
+        </button>
+        <button id="btn-exit-3d" class="bg-indigo-950/90 hover:bg-indigo-900 text-indigo-200 border border-indigo-400/50 text-xs font-semibold px-3.5 py-2 rounded-xl transition-colors flex items-center gap-1.5">
+            <i class="fa-solid fa-table-columns"></i> Dashboard
+        </button>
+    </div>
 
-        <div id="video-list" class="flex-1 overflow-y-auto p-3 space-y-2">
-            <!-- Loading Indicator -->
-            <div id="loading-indicator" class="text-center py-10 text-gray-400">
-                <i class="fa-solid fa-circle-notch fa-spin text-3xl mb-3 text-primary"></i>
-                <p class="text-sm font-medium">Connecting to Firestore...</p>
+    <!-- Toast Notification Container -->
+    <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2 max-w-sm w-full pointer-events-none px-4 sm:px-0"></div>
+
+    <!-- Mobile Sidebar Backdrop -->
+    <div id="sidebar-backdrop" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-20 hidden lg:hidden"></div>
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="ui-transition fixed lg:static inset-y-0 left-0 w-80 max-w-[85vw] glass-panel border-r border-indigo-500/20 flex flex-col h-full z-30 shadow-2xl transform -translate-x-full lg:translate-x-0">
+        <!-- Brand Header -->
+        <div class="p-5 border-b border-slate-800/80 flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500 via-indigo-600 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-600/30">
+                    <i class="fa-solid fa-brain text-white text-sm"></i>
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold bg-clip-text text-transparent bg-gradient-to-r from-cyan-300 via-indigo-300 to-purple-400 leading-tight">EduExtract 3D</h1>
+                    <p class="text-[11px] text-slate-400">Cloudflare D1 &amp; Edge RAG</p>
+                </div>
             </div>
+            <div class="flex items-center gap-2">
+                <span id="d1-live-pill" class="text-[10px] font-mono bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded-lg shadow">D1 EDGE</span>
+                <button id="btn-close-sidebar" class="lg:hidden text-slate-400 hover:text-white p-1.5 rounded-lg" aria-label="Close sidebar">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Primary Action & Quota Pill -->
+        <div class="p-4 border-b border-slate-800/80 space-y-2.5">
+            <button id="btn-open-modal" class="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-sm font-semibold py-2.5 px-4 rounded-xl shadow-lg shadow-indigo-600/25 transition-all">
+                <i class="fa-solid fa-bolt"></i> Topic / Video URL &amp; Run
+            </button>
+
+            <div class="flex items-center justify-between px-3 py-1.5 rounded-xl bg-slate-900/80 border border-slate-800 text-[11px] font-mono">
+                <span class="text-slate-400">Daily Quota:</span>
+                <span id="sidebar-quota-badge" class="text-cyan-300 font-semibold">-- / 10 left</span>
+            </div>
+
+            <div class="relative">
+                <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs"></i>
+                <input type="text" id="sidebar-search" placeholder="Filter lectures or topics..." class="w-full bg-slate-900/75 border border-slate-700/80 text-slate-200 text-xs rounded-xl pl-8 pr-3 py-2 focus:outline-none focus:border-indigo-500 transition-colors">
+            </div>
+        </div>
+
+        <!-- Lecture List -->
+        <div class="flex-1 overflow-y-auto custom-scroll p-3 space-y-2.5" id="video-list">
+            <div id="loading-indicator" class="flex flex-col items-center justify-center py-10 gap-3 text-slate-400">
+                <div class="animate-spin rounded-full h-8 w-8 border-2 border-cyan-400 border-t-transparent"></div>
+                <span class="text-xs font-mono">Fetching from Cloudflare D1...</span>
+            </div>
+        </div>
+
+        <!-- Sidebar Footer Stats -->
+        <div class="p-3.5 border-t border-slate-800/80 bg-slate-950/50 flex items-center justify-between text-[11px] font-mono text-slate-400">
+            <span id="sidebar-count-label">0 Lectures</span>
+            <button id="btn-refresh-d1" class="flex items-center gap-1.5 text-cyan-400 hover:text-cyan-200 transition-colors" title="Refresh from D1">
+                <i id="refresh-icon" class="fa-solid fa-rotate text-[11px]"></i>
+                <span id="sync-status-label">Sync D1</span>
+            </button>
         </div>
     </aside>
 
-    <!-- Main Content Area -->
-    <main class="flex-1 flex flex-col h-full relative overflow-hidden bg-gray-50">
-        
-        <!-- Empty State (Shown when no video is selected) -->
-        <div id="empty-state" class="absolute inset-0 flex flex-col items-center justify-center text-gray-400 z-0 bg-gray-50">
-            <div class="bg-white p-8 rounded-full shadow-sm mb-6">
-                <i class="fa-solid fa-book-open text-6xl text-gray-300"></i>
+    <!-- Main Workspace -->
+    <main class="ui-transition flex-1 flex flex-col h-full min-w-0 bg-transparent relative z-10">
+        <!-- Top Header -->
+        <header class="h-16 border-b border-slate-800/80 flex items-center justify-between px-4 sm:px-6 lg:px-8 glass-panel gap-3 shrink-0">
+            <div class="flex items-center gap-3 min-w-0 overflow-x-auto scrollbar-hide">
+                <button id="btn-open-sidebar" class="lg:hidden text-slate-300 hover:text-white p-2 rounded-xl bg-slate-800/70 border border-slate-700 shrink-0" aria-label="Open menu">
+                    <i class="fa-solid fa-bars"></i>
+                </button>
+
+                <nav id="tabs-container" class="flex items-center space-x-5 shrink-0">
+                    <button id="tab-summary" class="tab-btn hidden text-indigo-400 border-b-2 border-indigo-400 pb-1 font-medium text-sm transition-colors whitespace-nowrap">
+                        <i class="fa-solid fa-file-lines mr-1.5"></i>Summary &amp; Notes
+                    </button>
+                    <button id="tab-flashcards" class="tab-btn hidden text-slate-400 hover:text-slate-200 pb-1 font-medium text-sm transition-colors whitespace-nowrap">
+                        <i class="fa-solid fa-layer-group mr-1.5"></i>3D Flashcards
+                    </button>
+                    <button id="tab-rag" class="tab-btn text-slate-400 hover:text-slate-200 pb-1 font-medium text-sm transition-colors whitespace-nowrap">
+                        <i class="fa-solid fa-comments mr-1.5 text-cyan-400"></i>AI Tutor (RAG)
+                    </button>
+                    <button id="tab-telemetry" class="tab-btn text-slate-400 hover:text-slate-200 pb-1 font-medium text-sm transition-colors whitespace-nowrap">
+                        <i class="fa-solid fa-microchip mr-1.5 text-amber-400"></i>Compute &amp; Telemetry
+                    </button>
+                </nav>
             </div>
-            <h2 class="text-2xl font-semibold text-gray-600">Welcome to EduExtract</h2>
-            <p class="text-base mt-2 max-w-md text-center text-gray-500">Select a completed video from the sidebar to view your generated study guides and AI flashcards.</p>
-        </div>
 
-        <!-- Content State -->
-        <div id="content-area" class="hidden flex-col h-full z-10">
-            
-            <!-- Header -->
-            <header class="bg-white px-8 py-6 shadow-sm border-b border-gray-200 z-20">
-                <div class="flex justify-between items-start">
-                    <div>
-                        <span id="active-topic" class="text-xs font-bold text-primary uppercase tracking-wider bg-red-50 border border-red-100 px-2 py-1 rounded">Topic</span>
-                        <h2 id="active-title" class="text-2xl font-bold text-secondary mt-3 leading-tight">Video Title</h2>
-                        <div class="flex items-center gap-4 mt-3 text-sm text-gray-500">
-                            <span id="active-date" class="flex items-center bg-gray-50 px-2 py-1 rounded border border-gray-100"><i class="fa-regular fa-calendar mr-2"></i> Date</span>
-                            <span id="active-model" class="flex items-center bg-gray-50 px-2 py-1 rounded border border-gray-100"><i class="fa-solid fa-microchip mr-2 text-primary"></i> Model</span>
-                        </div>
+            <div class="flex items-center gap-2.5 shrink-0">
+                <button id="btn-toggle-3d" title="Inspect & Orbit 3D AI Brain" class="inline-flex items-center gap-1.5 text-xs font-mono text-cyan-300 hover:text-white border border-cyan-500/40 bg-cyan-950/50 hover:bg-cyan-600/40 px-3 py-1.5 rounded-xl transition-all shadow-sm">
+                    <i class="fa-solid fa-brain"></i> <span class="hidden md:inline">3D Brain</span>
+                </button>
+                <a href="https://github.com/1382sahar/eduextract-llm-pipeline/actions" target="_blank" rel="noopener noreferrer" class="hidden sm:inline-flex items-center gap-1.5 text-xs font-mono text-slate-300 hover:text-indigo-300 border border-slate-700 bg-slate-900/70 px-3 py-1.5 rounded-xl transition-colors">
+                    <i class="fa-brands fa-github"></i> Actions <i class="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
+                </a>
+                <div id="eval-badge-header" class="hidden items-center gap-1.5 text-xs bg-slate-900/80 border border-emerald-500/40 px-3 py-1.5 rounded-xl">
+                    <span class="text-slate-400 hidden sm:inline">Judge:</span>
+                    <span id="header-eval-score" class="font-bold font-mono text-emerald-400">--/10</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Dynamic Content Viewport -->
+        <div class="flex-1 overflow-y-auto custom-scroll p-4 sm:p-6 lg:p-8" id="main-content">
+            <div class="h-full flex flex-col items-center justify-center text-slate-300">
+                <div class="p-6 sm:p-8 rounded-3xl glass-panel border border-indigo-500/25 text-center max-w-lg shadow-2xl space-y-4">
+                    <div class="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-br from-cyan-500/20 to-purple-600/30 border border-cyan-400/40 flex items-center justify-center text-cyan-300 text-2xl shadow-inner">
+                        <i class="fa-solid fa-brain"></i>
                     </div>
-                </div>
-
-                <!-- Tabs -->
-                <div class="flex space-x-8 mt-6 border-b border-gray-200">
-                    <button id="tab-flashcards" class="pb-3 text-sm font-semibold border-b-2 border-primary text-primary transition-colors flex items-center">
-                        <i class="fa-regular fa-clone mr-2"></i> AI Flashcards
-                    </button>
-                    <button id="tab-guide" class="pb-3 text-sm font-semibold border-b-2 border-transparent text-gray-500 hover:text-gray-800 transition-colors flex items-center">
-                        <i class="fa-solid fa-list-ul mr-2"></i> Comprehensive Guide
-                    </button>
-                </div>
-            </header>
-
-            <!-- Scrollable Viewport -->
-            <div class="flex-1 overflow-y-auto p-8 relative">
-                
-                <!-- Flashcards View -->
-                <div id="view-flashcards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-7xl mx-auto">
-                    <!-- Cards injected here via JS -->
-                </div>
-
-                <!-- Study Guide View -->
-                <div id="view-guide" class="hidden max-w-4xl mx-auto space-y-6 pb-12">
-                    <!-- Sections injected here via JS -->
+                    <h2 class="text-xl sm:text-2xl font-bold text-white">EduExtract D1 Edge Hub</h2>
+                    <p class="text-sm text-slate-300 leading-relaxed">
+                        Powered by <span class="text-cyan-300 font-medium">Cloudflare D1</span> for instant zero-disconnect loading. Paste any <span class="text-indigo-300 font-medium">YouTube Video URL</span>, exact lecture title, or topic to generate study guides, 3D flashcards, and server-side RAG chat.
+                    </p>
+                    <div class="flex flex-wrap items-center justify-center gap-3 pt-2">
+                        <button id="btn-quick-new" class="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-sm font-semibold px-5 py-2.5 rounded-xl shadow-lg shadow-indigo-600/25 transition-all flex items-center gap-2">
+                            <i class="fa-solid fa-plus"></i> Add Topic / Video URL
+                        </button>
+                        <button id="btn-quick-rag" class="bg-slate-800/85 hover:bg-slate-700 text-slate-100 border border-slate-600 text-sm font-medium px-5 py-2.5 rounded-xl transition-all flex items-center gap-2">
+                            <i class="fa-solid fa-comments text-cyan-400"></i> Edge RAG Tutor
+                        </button>
+                        <button id="btn-quick-3d" class="bg-cyan-950/70 hover:bg-cyan-900/80 text-cyan-200 border border-cyan-500/40 text-sm font-medium px-5 py-2.5 rounded-xl transition-all flex items-center gap-2">
+                            <i class="fa-solid fa-brain text-cyan-400"></i> 3D AI Brain
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
     </main>
 
-    <!-- General Message Modal -->
-    <div id="msg-modal" class="fixed inset-0 bg-black bg-opacity-60 hidden items-center justify-center z-50 backdrop-blur-sm">
-        <div class="bg-white rounded-xl p-6 max-w-md w-full shadow-2xl transform transition-transform">
-            <h3 id="msg-title" class="text-xl font-bold text-secondary mb-3 flex items-center gap-2">
-                <i class="fa-solid fa-circle-info text-primary"></i> Message
-            </h3>
-            <p id="msg-desc" class="text-gray-600 mb-6 text-sm leading-relaxed whitespace-pre-wrap"></p>
-            <div class="text-right">
-                <button id="close-msg-btn" class="bg-primary text-white px-5 py-2.5 rounded-lg font-medium text-sm hover:bg-red-800 transition-colors shadow-md">Got it</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Search / Config Modal -->
-    <div id="search-modal" class="fixed inset-0 bg-black bg-opacity-60 hidden items-center justify-center z-50 backdrop-blur-sm transition-opacity">
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden transform scale-100 transition-transform">
-            <div class="bg-primary px-6 py-4 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-white flex items-center">
-                    <i class="fa-solid fa-cloud-arrow-down mr-3"></i> Configure Extraction
-                </h3>
-                <button id="btn-close-search-top" class="text-red-200 hover:text-white transition-colors">
-                    <i class="fa-solid fa-xmark text-xl"></i>
+    <!-- Modal: Dispatch Topic / Exact Title / Direct YouTube URL to Cloudflare D1 + GitHub Actions -->
+    <div id="request-modal" class="fixed inset-0 bg-black/75 backdrop-blur-md z-50 flex items-center justify-center p-4 hidden opacity-0 transition-opacity duration-300">
+        <div class="glass-panel border border-indigo-500/35 rounded-3xl shadow-2xl w-full max-w-md p-6 transform scale-95 transition-transform duration-300 max-h-[92vh] overflow-y-auto custom-scroll" id="modal-content">
+            <div class="flex justify-between items-start mb-4">
+                <div>
+                    <h3 class="text-lg font-bold text-white flex items-center gap-2">
+                        <i class="fa-solid fa-rocket text-cyan-400"></i> Dispatch AI Pipeline
+                    </h3>
+                    <p class="text-xs text-slate-400 mt-0.5">Saves to Cloudflare D1 Queue &amp; runs GitHub Actions</p>
+                </div>
+                <button id="btn-close-modal" class="text-slate-400 hover:text-white p-1 rounded-lg" aria-label="Close modal">
+                    <i class="fa-solid fa-xmark"></i>
                 </button>
             </div>
-            
-            <form id="search-form" class="p-6 space-y-5">
+
+            <!-- Live Quota Banner -->
+            <div id="modal-quota-banner" class="mb-4 px-3.5 py-2.5 rounded-xl bg-slate-900/90 border border-cyan-500/30 flex items-center justify-between text-xs font-mono">
+                <span class="text-slate-300"><i class="fa-solid fa-gauge-high text-cyan-400 mr-1.5"></i>Daily Quota (UTC)</span>
+                <span id="modal-quota-text" class="text-cyan-300 font-bold">-- / 10 remaining</span>
+            </div>
+
+            <div class="space-y-4">
                 <div>
-                    <label for="topic-input" class="block text-sm font-bold text-gray-700 mb-1">Target Topic</label>
-                    <input type="text" id="topic-input" placeholder="e.g., Quantum Physics, Calculus..." required
-                           class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-shadow bg-gray-50">
-                </div>
-                
-                <div>
-                    <label for="count-input" class="block text-sm font-bold text-gray-700 mb-1">Number of Videos</label>
-                    <input type="number" id="count-input" min="1" max="10" value="5" required
-                           class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-shadow bg-gray-50">
-                    <p class="text-xs text-gray-500 mt-2"><i class="fa-solid fa-circle-info mr-1 text-primary"></i> Maximum 10 videos per run to conserve API quota.</p>
+                    <label for="input-topic" class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
+                        Topic, Exact Video Title, or YouTube URL
+                    </label>
+                    <input type="text" id="input-topic" dir="auto" placeholder="موضوع، عنوان دقیق ویدیو یا لینک یوتیوب (youtu.be/...)" class="w-full bg-slate-900/90 border border-slate-700 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-cyan-400">
+                    <div id="direct-url-indicator" class="hidden mt-2 px-3 py-1.5 rounded-lg bg-emerald-950/80 border border-emerald-500/40 text-[11px] text-emerald-300 font-medium flex items-center gap-1.5" dir="rtl">
+                        <i class="fa-brands fa-youtube text-rose-400"></i>
+                        <span>لینک مستقیم ویدیوی یوتیوب شناسایی شد! دقیقاً همین ویدیو جزوه می‌شود (۱ ویدیو).</span>
+                    </div>
                 </div>
 
-                <div class="pt-4 flex gap-3">
-                    <button type="button" id="btn-close-search-bottom" class="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 transition-colors">Cancel</button>
-                    <button type="submit" id="submit-search-btn" class="flex-1 px-4 py-2.5 bg-primary text-white rounded-lg font-bold hover:bg-red-800 transition-colors flex justify-center items-center gap-2 shadow-md">
-                        Save Config
-                    </button>
+                <div>
+                    <label for="input-count" class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">Number of Videos (1 - 10)</label>
+                    <input type="number" id="input-count" value="2" min="1" max="10" class="w-full bg-slate-900/90 border border-slate-700 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-cyan-400">
                 </div>
-            </form>
+
+                <details class="pt-2 border-t border-slate-800">
+                    <summary class="text-[11px] font-mono text-slate-400 cursor-pointer hover:text-indigo-300 select-none">
+                        Admin PIN (Only if enabled in Cloudflare Worker)
+                    </summary>
+                    <div class="mt-2">
+                        <input type="password" id="input-admin-pin" placeholder="Optional ADMIN_PIN..." class="w-full bg-slate-900/90 border border-slate-700 text-white rounded-xl px-4 py-2 text-xs font-mono focus:outline-none focus:border-indigo-500">
+                    </div>
+                </details>
+
+                <div id="dispatch-status" class="hidden p-3 rounded-xl text-xs font-mono leading-relaxed"></div>
+
+                <!-- Recent Queue List from D1 -->
+                <div id="recent-queue-box" class="hidden pt-3 border-t border-slate-800 space-y-1.5">
+                    <p class="text-[10px] font-mono uppercase tracking-wider text-slate-400">Recent D1 Queue</p>
+                    <div id="recent-queue-list" class="space-y-1.5"></div>
+                </div>
+            </div>
+
+            <div class="mt-6 flex gap-3">
+                <button id="btn-cancel-modal" class="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-200 py-2.5 rounded-xl text-sm font-medium border border-slate-600 transition-colors">
+                    Cancel
+                </button>
+                <button id="btn-submit-topic" class="flex-1 bg-gradient-to-r from-cyan-600 via-indigo-600 to-purple-600 hover:from-cyan-500 hover:to-purple-500 text-white py-2.5 rounded-xl text-sm font-semibold shadow-lg transition-all">
+                    <i class="fa-solid fa-paper-plane mr-1"></i> Save &amp; Run
+                </button>
+            </div>
         </div>
     </div>
 
-    <!-- Firebase SDK (Modular) -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getFirestore, collection, query, getDocs, doc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    <!-- Three.js Interactive 3D AI Brain & Cosmic Starfield Engine -->
+    <script>
+        window.warpSpeed = 1;
+        window.brainPulseEnergy = 0;
 
-        // Your specific Firebase configuration
-        const firebaseConfig = {
-            apiKey: "AIzaSyCcNsOTxaUC6NVBi6vuwJATVEEPn-zq6g0",
-            authDomain: "resome-7ce80.firebaseapp.com",
-            projectId: "resome-7ce80",
-            storageBucket: "resome-7ce80.firebasestorage.app",
-            messagingSenderId: "279753299824",
-            appId: "1:279753299824:web:340459d03b6565204561b5",
-            measurementId: "G-JYDNHQG5VE"
+        window.triggerBrainPulse = function (intensity = 1.6) {
+            window.brainPulseEnergy = Math.min(3.5, Math.max(window.brainPulseEnergy, intensity));
+            window.warpSpeed = Math.max(window.warpSpeed, 1 + intensity * 2.2);
         };
 
-        let db;
-        let allVideos = [];
-        let currentVideo = null;
+        window.toggle3DShowcase = function (forceState) {
+            const hud = document.getElementById('hud-3d-controls');
+            const shouldEnable = typeof forceState === 'boolean'
+                ? forceState
+                : !document.body.classList.contains('showcase-3d');
 
-        // --- Core Initialization ---
-        function initApp() {
-            try {
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                fetchAllVideos();
-            } catch (error) {
-                console.error("Firebase Init Error:", error);
-                showMsgModal("Connection Error", "Could not connect to Firebase. Check console for details.");
+            document.body.classList.toggle('showcase-3d', shouldEnable);
+            if (hud) {
+                hud.classList.toggle('hidden', !shouldEnable);
+                hud.classList.toggle('flex', shouldEnable);
             }
+            if (shouldEnable) {
+                window.triggerBrainPulse(1.4);
+            }
+        };
+
+        function init3DAIBrainScene() {
+            const canvas = document.getElementById('bg-canvas');
+            if (!canvas || typeof THREE === 'undefined') return;
+
+            function createGlowTexture(innerRGBA, midRGBA, outerRGBA) {
+                const size = 128;
+                const texCanvas = document.createElement('canvas');
+                texCanvas.width = size;
+                texCanvas.height = size;
+                const ctx = texCanvas.getContext('2d');
+                const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+                grad.addColorStop(0, innerRGBA);
+                grad.addColorStop(0.35, midRGBA);
+                grad.addColorStop(1, outerRGBA);
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, size, size);
+                const texture = new THREE.CanvasTexture(texCanvas);
+                texture.needsUpdate = true;
+                return texture;
+            }
+
+            const starTexture = createGlowTexture('rgba(255,255,255,1)', 'rgba(186,230,253,0.65)', 'rgba(0,0,0,0)');
+            const neuronTexture = createGlowTexture('rgba(255,255,255,1)', 'rgba(99,102,241,0.72)', 'rgba(0,0,0,0)');
+            const pulseTexture = createGlowTexture('rgba(255,255,255,1)', 'rgba(56,189,248,0.92)', 'rgba(56,189,248,0)');
+            const nebulaTexture = createGlowTexture('rgba(99,102,241,0.22)', 'rgba(56,189,248,0.08)', 'rgba(0,0,0,0)');
+
+            const scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x020617, 0.0042);
+
+            const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 1000);
+            let targetCamZ = window.innerWidth < 768 ? 42 : 33;
+            camera.position.set(0, 1.5, targetCamZ);
+
+            const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+            // 1. Cosmic Starfield & Nebula
+            const cosmosGroup = new THREE.Group();
+            scene.add(cosmosGroup);
+
+            const starCount = window.innerWidth < 768 ? 1400 : 2400;
+            const starPos = new Float32Array(starCount * 3);
+            const starCol = new Float32Array(starCount * 3);
+            const starPalette = [
+                new THREE.Color(0xffffff),
+                new THREE.Color(0xe0f2fe),
+                new THREE.Color(0x93c5fd),
+                new THREE.Color(0xc4b5fd),
+                new THREE.Color(0xfef3c7),
+                new THREE.Color(0x67e8f9)
+            ];
+
+            for (let i = 0; i < starCount; i++) {
+                const radius = 58 + Math.random() * 190;
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+
+                starPos[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+                starPos[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+                starPos[i * 3 + 2] = radius * Math.cos(phi);
+
+                const chosen = starPalette[Math.floor(Math.random() * starPalette.length)];
+                const brightness = 0.55 + Math.random() * 0.45;
+                starCol[i * 3] = chosen.r * brightness;
+                starCol[i * 3 + 1] = chosen.g * brightness;
+                starCol[i * 3 + 2] = chosen.b * brightness;
+            }
+
+            const starGeo = new THREE.BufferGeometry();
+            starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+            starGeo.setAttribute('color', new THREE.BufferAttribute(starCol, 3));
+            cosmosGroup.add(new THREE.Points(starGeo, new THREE.PointsMaterial({
+                size: 1.15, map: starTexture, vertexColors: true, transparent: true,
+                opacity: 0.92, depthWrite: false, blending: THREE.AdditiveBlending
+            })));
+
+            const heroStarCount = 160;
+            const heroPos = new Float32Array(heroStarCount * 3);
+            const heroCol = new Float32Array(heroStarCount * 3);
+            for (let i = 0; i < heroStarCount; i++) {
+                const r = 48 + Math.random() * 110;
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+                heroPos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+                heroPos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+                heroPos[i * 3 + 2] = r * Math.cos(phi);
+                const c = i % 2 === 0 ? new THREE.Color(0xbae6fd) : new THREE.Color(0xe9d5ff);
+                heroCol[i * 3] = c.r; heroCol[i * 3 + 1] = c.g; heroCol[i * 3 + 2] = c.b;
+            }
+            const heroStarGeo = new THREE.BufferGeometry();
+            heroStarGeo.setAttribute('position', new THREE.BufferAttribute(heroPos, 3));
+            heroStarGeo.setAttribute('color', new THREE.BufferAttribute(heroCol, 3));
+            const heroStarMat = new THREE.PointsMaterial({
+                size: 2.35, map: starTexture, vertexColors: true, transparent: true,
+                opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending
+            });
+            cosmosGroup.add(new THREE.Points(heroStarGeo, heroStarMat));
+
+            [
+                { pos: [-34, 18, -55], scale: 72, color: 0x4f46e5 },
+                { pos: [38, -14, -60], scale: 68, color: 0x0891b2 },
+                { pos: [6, 22, -70], scale: 82, color: 0x7c3aed }
+            ].forEach((cfg) => {
+                const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+                    map: nebulaTexture, color: cfg.color, transparent: true,
+                    opacity: 0.45, depthWrite: false, blending: THREE.AdditiveBlending
+                }));
+                sprite.position.set(cfg.pos[0], cfg.pos[1], cfg.pos[2]);
+                sprite.scale.set(cfg.scale, cfg.scale, 1);
+                cosmosGroup.add(sprite);
+            });
+
+            const shootingStars = [];
+            for (let i = 0; i < 3; i++) {
+                const trailGeo = new THREE.BufferGeometry().setFromPoints([
+                    new THREE.Vector3(0, 0, 0), new THREE.Vector3(-4.5, 1.8, 0)
+                ]);
+                const line = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({
+                    color: 0xe0f2fe, transparent: true, opacity: 0, blending: THREE.AdditiveBlending
+                }));
+                cosmosGroup.add(line);
+                shootingStars.push({ mesh: line, active: false, cooldown: 1.5 + i * 3 + Math.random() * 2, velocity: new THREE.Vector3(), life: 0 });
+            }
+
+            // 2. Procedural 3D AI Brain
+            const brainGroup = new THREE.Group();
+            scene.add(brainGroup);
+
+            const neurons = [];
+            const cCyan = new THREE.Color(0x38bdf8);
+            const cIndigo = new THREE.Color(0x6366f1);
+            const cViolet = new THREE.Color(0xc084fc);
+            const cEmerald = new THREE.Color(0x34d399);
+
+            function sampleHemispherePoint(side) {
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+                let sx = Math.sin(phi) * Math.cos(theta);
+                let sy = Math.cos(phi);
+                let sz = Math.sin(phi) * Math.sin(theta);
+                if (side * sx < 0) sx *= 0.24;
+
+                const shellRadius = 0.80 + Math.pow(Math.random(), 0.45) * 0.22;
+                let x = sx * 5.6 * shellRadius;
+                let y = sy * 6.5 * shellRadius;
+                let z = sz * 9.4 * shellRadius;
+
+                if (z > 0) {
+                    x *= 1 - (z / 12.5) * 0.24;
+                    y *= 1 - (z / 14.0) * 0.14;
+                }
+                if (y < 0) {
+                    y *= 0.74;
+                    x += side * Math.exp(-Math.pow((z - 0.8) / 4.2, 2)) * 0.85 * Math.abs(y / 5.5);
+                }
+
+                const folds = Math.sin(x * 1.15 + z * 0.85) * 0.34 + Math.cos(y * 1.35 - z * 0.95) * 0.28 + Math.sin((x + y + z) * 1.75) * 0.16;
+                x += side * (2.25 + folds * 0.55);
+                y += 1.2 + folds * 0.48;
+                z += folds * 0.42;
+                return new THREE.Vector3(x, y, z);
+            }
+
+            const hemisphereNeuronCount = window.innerWidth < 768 ? 520 : 800;
+            for (const side of [-1, 1]) {
+                for (let i = 0; i < hemisphereNeuronCount; i++) {
+                    const p = sampleHemispherePoint(side);
+                    const t = THREE.MathUtils.clamp((p.z + 9.5) / 19.0, 0, 1);
+                    const col = new THREE.Color().copy(cViolet).lerp(cIndigo, 0.5).lerp(cCyan, t);
+                    if (Math.random() < 0.08) col.lerp(cEmerald, 0.7);
+                    neurons.push({ pos: p, region: side < 0 ? 'left' : 'right', color: col });
+                }
+            }
+
+            const cerebellumCount = window.innerWidth < 768 ? 140 : 220;
+            for (let i = 0; i < cerebellumCount; i++) {
+                const side = i % 2 === 0 ? -1 : 1;
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+                const r = 0.78 + Math.random() * 0.22;
+                const cx = Math.sin(phi) * Math.cos(theta) * 3.1 * r + side * 2.1;
+                const cy = Math.cos(phi) * 2.2 * r - 4.1;
+                const cz = Math.sin(phi) * Math.sin(theta) * 2.9 * r - 5.8 + Math.sin(cy * 4.5) * 0.16;
+                neurons.push({ pos: new THREE.Vector3(cx, cy, cz), region: 'cerebellum', color: new THREE.Color().copy(cViolet).lerp(cIndigo, 0.45) });
+            }
+
+            for (let i = 0; i < 85; i++) {
+                const h = Math.random();
+                const angle = Math.random() * Math.PI * 2;
+                const rad = (1.65 - h * 0.55) * (0.75 + Math.random() * 0.25);
+                neurons.push({
+                    pos: new THREE.Vector3(Math.cos(angle) * rad, -2.4 - h * 5.8, -2.4 + Math.sin(angle) * rad - h * 1.1),
+                    region: 'stem',
+                    color: new THREE.Color().copy(cCyan).lerp(cEmerald, h * 0.6)
+                });
+            }
+
+            const neuronPositions = new Float32Array(neurons.length * 3);
+            const neuronColors = new Float32Array(neurons.length * 3);
+            for (let i = 0; i < neurons.length; i++) {
+                neuronPositions[i * 3] = neurons[i].pos.x;
+                neuronPositions[i * 3 + 1] = neurons[i].pos.y;
+                neuronPositions[i * 3 + 2] = neurons[i].pos.z;
+                neuronColors[i * 3] = neurons[i].color.r;
+                neuronColors[i * 3 + 1] = neurons[i].color.g;
+                neuronColors[i * 3 + 2] = neurons[i].color.b;
+            }
+            const neuronGeo = new THREE.BufferGeometry();
+            neuronGeo.setAttribute('position', new THREE.BufferAttribute(neuronPositions, 3));
+            neuronGeo.setAttribute('color', new THREE.BufferAttribute(neuronColors, 3));
+            brainGroup.add(new THREE.Points(neuronGeo, new THREE.PointsMaterial({
+                size: 0.72, map: neuronTexture, vertexColors: true, transparent: true,
+                opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending
+            })));
+
+            const synapsePairs = [];
+            const linePosArr = [];
+            const lineColArr = [];
+            const maxLinkDistSq = 2.45 * 2.45;
+            for (let i = 0; i < neurons.length; i++) {
+                let links = 0;
+                const a = neurons[i];
+                for (let j = i + 1; j < neurons.length; j++) {
+                    if (links >= 4) break;
+                    const b = neurons[j];
+                    const crossHemi = (a.region === 'left' && b.region === 'right') || (a.region === 'right' && b.region === 'left');
+                    if (crossHemi && (Math.abs(a.pos.y - 1.0) > 1.8 || Math.abs(a.pos.z) > 4.2)) continue;
+                    const dSq = a.pos.distanceToSquared(b.pos);
+                    if (dSq < maxLinkDistSq && dSq > 0.25) {
+                        linePosArr.push(a.pos.x, a.pos.y, a.pos.z, b.pos.x, b.pos.y, b.pos.z);
+                        lineColArr.push(a.color.r, a.color.g, a.color.b, b.color.r, b.color.g, b.color.b);
+                        synapsePairs.push([a.pos, b.pos]);
+                        links++;
+                    }
+                }
+            }
+            const synapseGeo = new THREE.BufferGeometry();
+            synapseGeo.setAttribute('position', new THREE.Float32BufferAttribute(linePosArr, 3));
+            synapseGeo.setAttribute('color', new THREE.Float32BufferAttribute(lineColArr, 3));
+            const synapseMat = new THREE.LineBasicMaterial({
+                vertexColors: true, transparent: true, opacity: 0.26, depthWrite: false, blending: THREE.AdditiveBlending
+            });
+            brainGroup.add(new THREE.LineSegments(synapseGeo, synapseMat));
+
+            const innerCoreMat = new THREE.MeshBasicMaterial({ color: 0x312e81, transparent: true, opacity: 0.14, wireframe: true });
+            [-1, 1].forEach((side) => {
+                const hemiGeo = new THREE.SphereGeometry(4.4, 18, 14);
+                hemiGeo.scale(0.88, 1.08, 1.55);
+                const hemiMesh = new THREE.Mesh(hemiGeo, innerCoreMat);
+                hemiMesh.position.set(side * 3.1, 1.0, 0);
+                brainGroup.add(hemiMesh);
+            });
+
+            const pulseCount = window.innerWidth < 768 ? 55 : 95;
+            const pulsePositions = new Float32Array(pulseCount * 3);
+            const pulseColors = new Float32Array(pulseCount * 3);
+            const activePulses = [];
+            for (let i = 0; i < pulseCount; i++) {
+                activePulses.push({
+                    edgeIdx: Math.floor(Math.random() * Math.max(1, synapsePairs.length)),
+                    progress: Math.random(),
+                    speed: 0.015 + Math.random() * 0.028,
+                    reverse: Math.random() > 0.5
+                });
+                const c = i % 3 === 0 ? cEmerald : cCyan;
+                pulseColors[i * 3] = c.r; pulseColors[i * 3 + 1] = c.g; pulseColors[i * 3 + 2] = c.b;
+            }
+            const pulseGeo = new THREE.BufferGeometry();
+            pulseGeo.setAttribute('position', new THREE.BufferAttribute(pulsePositions, 3));
+            pulseGeo.setAttribute('color', new THREE.BufferAttribute(pulseColors, 3));
+            const pulseMat = new THREE.PointsMaterial({
+                size: 1.55, map: pulseTexture, vertexColors: true, transparent: true,
+                opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending
+            });
+            brainGroup.add(new THREE.Points(pulseGeo, pulseMat));
+
+            const ring1 = new THREE.Mesh(
+                new THREE.TorusGeometry(13.8, 0.045, 8, 120),
+                new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending })
+            );
+            ring1.rotation.x = Math.PI * 0.44; ring1.rotation.y = 0.22;
+            brainGroup.add(ring1);
+
+            const ring2 = new THREE.Mesh(
+                new THREE.TorusGeometry(16.2, 0.035, 8, 120),
+                new THREE.MeshBasicMaterial({ color: 0xa855f7, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending })
+            );
+            ring2.rotation.x = -Math.PI * 0.36; ring2.rotation.z = 0.35;
+            brainGroup.add(ring2);
+
+            brainGroup.rotation.y = -0.55; brainGroup.rotation.x = 0.12;
+
+            // 3. Orbit Controls & Parallax
+            let mouseX = 0, mouseY = 0, isDragging = false, prevPointerX = 0, prevPointerY = 0;
+            let userOrbitY = -0.55, userOrbitX = 0.12;
+
+            window.addEventListener('mousemove', (e) => {
+                mouseX = (e.clientX / window.innerWidth - 0.5) * 2;
+                mouseY = -(e.clientY / window.innerHeight - 0.5) * 2;
+                if (isDragging) {
+                    userOrbitY += (e.clientX - prevPointerX) * 0.0075;
+                    userOrbitX = THREE.MathUtils.clamp(userOrbitX + (e.clientY - prevPointerY) * 0.006, -1.1, 1.1);
+                    prevPointerX = e.clientX; prevPointerY = e.clientY;
+                }
+            });
+            canvas.addEventListener('mousedown', (e) => { isDragging = true; prevPointerX = e.clientX; prevPointerY = e.clientY; });
+            window.addEventListener('mouseup', () => { isDragging = false; });
+            canvas.addEventListener('touchstart', (e) => {
+                if (e.touches.length === 1) { isDragging = true; prevPointerX = e.touches[0].clientX; prevPointerY = e.touches[0].clientY; }
+            }, { passive: true });
+            window.addEventListener('touchmove', (e) => {
+                if (e.touches.length === 1 && isDragging) {
+                    userOrbitY += (e.touches[0].clientX - prevPointerX) * 0.0085;
+                    userOrbitX = THREE.MathUtils.clamp(userOrbitX + (e.touches[0].clientY - prevPointerY) * 0.007, -1.1, 1.1);
+                    prevPointerX = e.touches[0].clientX; prevPointerY = e.touches[0].clientY;
+                }
+            }, { passive: true });
+            window.addEventListener('touchend', () => { isDragging = false; });
+            canvas.addEventListener('wheel', (e) => {
+                if (!document.body.classList.contains('showcase-3d')) return;
+                e.preventDefault();
+                targetCamZ = THREE.MathUtils.clamp(targetCamZ + e.deltaY * 0.02, 16, 62);
+            }, { passive: false });
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            document.getElementById('btn-toggle-3d')?.addEventListener('click', () => window.toggle3DShowcase());
+            document.getElementById('btn-quick-3d')?.addEventListener('click', () => window.toggle3DShowcase(true));
+            document.getElementById('btn-exit-3d')?.addEventListener('click', () => window.toggle3DShowcase(false));
+            document.getElementById('btn-fire-synapse')?.addEventListener('click', () => window.triggerBrainPulse(2.4));
+            document.getElementById('btn-reset-camera')?.addEventListener('click', () => {
+                userOrbitY = -0.55; userOrbitX = 0.12; targetCamZ = window.innerWidth < 768 ? 42 : 33;
+            });
+
+            const clock = new THREE.Clock();
+            function animate() {
+                requestAnimationFrame(animate);
+                const dt = Math.min(clock.getDelta(), 0.05);
+                const elapsed = clock.getElapsedTime();
+                const energy = window.brainPulseEnergy;
+                const speedMult = window.warpSpeed;
+
+                if (!isDragging) userOrbitY += 0.0028 * speedMult;
+                brainGroup.rotation.y += ((userOrbitY + (isDragging ? 0 : mouseX * 0.25)) - brainGroup.rotation.y) * 0.06;
+                brainGroup.rotation.x += ((userOrbitX + (isDragging ? 0 : -mouseY * 0.18)) - brainGroup.rotation.x) * 0.06;
+                brainGroup.position.y = Math.sin(elapsed * 1.1) * 0.55;
+                brainGroup.scale.setScalar(1 + Math.sin(elapsed * 2.2) * 0.008 + energy * 0.025);
+                synapseMat.opacity = Math.min(0.7, 0.24 + energy * 0.18);
+                pulseMat.size = 1.55 + energy * 0.65;
+                ring1.rotation.z += 0.004 * speedMult;
+                ring2.rotation.z -= 0.003 * speedMult;
+
+                if (synapsePairs.length > 0) {
+                    const pArr = pulseGeo.attributes.position.array;
+                    for (let i = 0; i < pulseCount; i++) {
+                        const p = activePulses[i];
+                        p.progress += p.speed * (1 + energy * 1.6);
+                        if (p.progress >= 1) {
+                            p.progress = 0;
+                            p.edgeIdx = Math.floor(Math.random() * synapsePairs.length);
+                            p.reverse = Math.random() > 0.5;
+                        }
+                        const pair = synapsePairs[p.edgeIdx];
+                        const start = p.reverse ? pair[1] : pair[0];
+                        const end = p.reverse ? pair[0] : pair[1];
+                        pArr[i * 3] = start.x + (end.x - start.x) * p.progress;
+                        pArr[i * 3 + 1] = start.y + (end.y - start.y) * p.progress;
+                        pArr[i * 3 + 2] = start.z + (end.z - start.z) * p.progress;
+                    }
+                    pulseGeo.attributes.position.needsUpdate = true;
+                }
+
+                cosmosGroup.rotation.y += 0.00045 * speedMult;
+                cosmosGroup.rotation.x += 0.00015;
+                heroStarMat.opacity = 0.68 + Math.sin(elapsed * 2.4) * 0.24;
+
+                shootingStars.forEach((s) => {
+                    if (!s.active) {
+                        s.cooldown -= dt;
+                        if (s.cooldown <= 0) {
+                            s.active = true; s.life = 1.0;
+                            s.mesh.position.set((Math.random() - 0.3) * 95, 22 + Math.random() * 40, -40 - Math.random() * 50);
+                            s.velocity.set(36 + Math.random() * 22, -(14 + Math.random() * 12), 0);
+                            s.mesh.material.opacity = 0.85;
+                        }
+                    } else {
+                        s.mesh.position.addScaledVector(s.velocity, dt);
+                        s.life -= dt * 1.15;
+                        s.mesh.material.opacity = Math.max(0, s.life * 0.85);
+                        if (s.life <= 0) { s.active = false; s.cooldown = 3.5 + Math.random() * 6.5; s.mesh.material.opacity = 0; }
+                    }
+                });
+
+                camera.position.z += (targetCamZ - camera.position.z) * 0.08;
+                if (window.warpSpeed > 1) window.warpSpeed = Math.max(1, window.warpSpeed * 0.97);
+                if (window.brainPulseEnergy > 0.001) window.brainPulseEnergy *= 0.965;
+                else window.brainPulseEnergy = 0;
+
+                renderer.render(scene, camera);
+            }
+            animate();
         }
 
-        // --- Data Fetching & Caching (Stale-while-revalidate) ---
-        async function fetchAllVideos() {
-            const videoList = document.getElementById('video-list');
-            
-            // 1. Instant load from localStorage cache
-            const cachedData = localStorage.getItem('eduExtract_videos_v2');
-            if (cachedData) {
-                console.log("⚡ Loading from local cache...");
-                allVideos = JSON.parse(cachedData);
-                document.getElementById('video-count').textContent = allVideos.length;
-                renderSidebar();
-                
-                // Select first video if none is selected
-                if (allVideos.length > 0 && !currentVideo) {
-                    selectVideo(allVideos[0].id);
-                }
-            }
+        window.addEventListener('DOMContentLoaded', init3DAIBrainScene);
+    </script>
 
-            // 2. Fetch fresh data in the background
+    <!-- Application Logic: 100% Cloudflare D1 Edge Backend (Zero Firebase) -->
+    <script>
+        const GITHUB_OWNER = "1382sahar";
+        const GITHUB_REPO = "eduextract-llm-pipeline";
+        const WORKER_URL = "https://eduextract-chat.ssa210819.workers.dev";
+        const YT_URL_REGEX = /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/;
+
+        // --- Application State ---
+        let videosData = [];
+        let vectorCount = 0;
+        let quotaState = { limit: 10, used: 0, remaining: 10, recent_queue: [] };
+        let chatHistory = [];
+        let currentSelectedVideo = null;
+        let currentTab = 'home';
+        let searchFilter = "";
+        let pollTimer = null;
+
+        function escapeHTML(str) {
+            return String(str ?? "")
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
+
+        function showToast(message, type = "info") {
+            const container = document.getElementById('toast-container');
+            if (!container) return;
+
+            const styles = {
+                info: "border-indigo-500/50 bg-slate-900/95 text-indigo-200",
+                success: "border-emerald-500/50 bg-emerald-950/95 text-emerald-200",
+                warning: "border-amber-500/50 bg-amber-950/95 text-amber-200",
+                error: "border-rose-500/50 bg-rose-950/95 text-rose-200"
+            };
+            const icons = {
+                info: "fa-circle-info text-indigo-400",
+                success: "fa-circle-check text-emerald-400",
+                warning: "fa-triangle-exclamation text-amber-400",
+                error: "fa-circle-xmark text-rose-400"
+            };
+
+            const toast = document.createElement('div');
+            toast.className = `pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-2xl border shadow-2xl backdrop-blur-md text-xs font-medium transition-all duration-300 opacity-0 translate-y-2 ${styles[type] || styles.info}`;
+            toast.innerHTML = `
+                <i class="fa-solid ${icons[type] || icons.info} text-sm shrink-0"></i>
+                <span class="flex-1 leading-relaxed" dir="auto">${escapeHTML(message)}</span>
+            `;
+
+            container.appendChild(toast);
+            requestAnimationFrame(() => toast.classList.remove('opacity-0', 'translate-y-2'));
+            setTimeout(() => {
+                toast.classList.add('opacity-0', 'translate-y-2');
+                setTimeout(() => toast.remove(), 300);
+            }, 4200);
+        }
+
+        // --- Mobile Sidebar Drawer ---
+        const sidebarEl = document.getElementById('sidebar');
+        const backdropEl = document.getElementById('sidebar-backdrop');
+        function openMobileSidebar() { sidebarEl.classList.remove('-translate-x-full'); backdropEl.classList.remove('hidden'); }
+        function closeMobileSidebar() { sidebarEl.classList.add('-translate-x-full'); backdropEl.classList.add('hidden'); }
+
+        document.getElementById('btn-open-sidebar')?.addEventListener('click', openMobileSidebar);
+        document.getElementById('btn-close-sidebar')?.addEventListener('click', closeMobileSidebar);
+        backdropEl?.addEventListener('click', closeMobileSidebar);
+
+        // --- Cloudflare D1 Sync (Fast HTTP + Smart Polling) ---
+        async function fetchDashboardData(silent = false) {
+            const refreshIcon = document.getElementById('refresh-icon');
+            const syncLabel = document.getElementById('sync-status-label');
+            if (refreshIcon) refreshIcon.classList.add('fa-spin');
+            if (syncLabel && !silent) syncLabel.textContent = "Syncing...";
+
             try {
-                const q = query(collection(db, "Pipeline_State"));
-                const querySnapshot = await getDocs(q);
-                
-                const freshVideos = [];
-                querySnapshot.forEach((doc) => {
-                    freshVideos.push({ id: doc.id, ...doc.data() });
-                });
+                const [vidRes, quotaRes] = await Promise.all([
+                    fetch(`${WORKER_URL}/api/videos`),
+                    fetch(`${WORKER_URL}/api/quota`)
+                ]);
 
-                // Sort newest first
-                freshVideos.sort((a, b) => {
-                    const dateA = new Date(a.updated_at || a.ingested_at || 0);
-                    const dateB = new Date(b.updated_at || b.ingested_at || 0);
-                    return dateB - dateA;
-                });
+                if (!vidRes.ok) throw new Error(`D1 /api/videos HTTP ${vidRes.status}`);
+                const vidJson = await vidRes.json();
+                videosData = Array.isArray(vidJson.videos) ? vidJson.videos : [];
+                vectorCount = Number(vidJson.vector_count || 0);
 
-                if (freshVideos.length === 0) {
-                    if (!cachedData) {
-                        videoList.innerHTML = '<div class="text-center py-10"><i class="fa-solid fa-box-open text-3xl text-gray-300 mb-2"></i><p class="text-gray-500 text-sm">No videos found in database.</p></div>';
-                    }
-                    return;
+                if (quotaRes.ok) {
+                    quotaState = await quotaRes.json();
+                    updateQuotaUI();
                 }
 
-                // 3. Update cache & UI
-                localStorage.setItem('eduExtract_videos_v2', JSON.stringify(freshVideos));
-                allVideos = freshVideos;
-                document.getElementById('video-count').textContent = allVideos.length;
-                renderSidebar();
-                
-                // Update currently viewed video if data changed
-                if (!currentVideo && allVideos.length > 0) {
-                    selectVideo(allVideos[0].id);
-                } else if (currentVideo) {
-                    const updatedCurrent = allVideos.find(v => v.id === currentVideo.id);
-                    if(updatedCurrent) {
-                        currentVideo = updatedCurrent;
-                        // Silently refresh content if it's already open
-                        if (document.getElementById('content-area').classList.contains('flex')) {
-                            selectVideo(currentVideo.id);
+                renderSidebar(videosData);
+
+                if (currentSelectedVideo) {
+                    const fresh = videosData.find(v => v.id === currentSelectedVideo.id);
+                    if (fresh) {
+                        const statusChanged = fresh.status !== currentSelectedVideo.status;
+                        currentSelectedVideo = fresh;
+                        if (statusChanged && fresh.status === "COMPLETED") {
+                            showToast(`جزوه «${fresh.title}» آماده شد!`, "success");
+                            selectVideo(fresh.id);
                         }
                     }
                 }
 
-            } catch (error) {
-                console.error("Error fetching documents: ", error);
-                if (!cachedData) {
-                    videoList.innerHTML = `<div class="text-center py-10 bg-red-50 rounded-lg mx-2"><p class="text-red-500 text-sm font-bold"><i class="fa-solid fa-triangle-exclamation mr-1"></i> Connection Error</p><p class="text-xs text-red-400 mt-1">${error.message}</p></div>`;
+                updateRAGStatusBadge();
+                if (currentTab === 'telemetry') renderTelemetry();
+                scheduleSmartPolling();
+
+                const livePill = document.getElementById('d1-live-pill');
+                if (livePill) {
+                    livePill.textContent = "D1 ONLINE";
+                    livePill.className = "text-[10px] font-mono bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded-lg shadow";
                 }
+            } catch (err) {
+                console.error("D1 sync error:", err);
+                const livePill = document.getElementById('d1-live-pill');
+                if (livePill) {
+                    livePill.textContent = "OFFLINE";
+                    livePill.className = "text-[10px] font-mono bg-rose-950/90 text-rose-300 border border-rose-500/40 px-2 py-0.5 rounded-lg shadow";
+                }
+                if (videosData.length === 0) {
+                    document.getElementById('video-list').innerHTML = `
+                        <div class="p-4 text-xs text-rose-300 bg-rose-950/40 border border-rose-500/30 rounded-xl space-y-2">
+                            <p><i class="fa-solid fa-wifi mr-1.5"></i>خطا در اتصال به Cloudflare D1.</p>
+                            <p class="font-mono text-[10px] text-rose-400 break-words">${escapeHTML(err.message)}</p>
+                            <button onclick="fetchDashboardData(false)" class="px-3 py-1 bg-rose-900/80 hover:bg-rose-800 rounded-lg text-white text-[11px]">Retry</button>
+                        </div>
+                    `;
+                }
+            } finally {
+                if (refreshIcon) refreshIcon.classList.remove('fa-spin');
+                if (syncLabel) syncLabel.textContent = "Sync D1";
+            }
+        }
+
+        function scheduleSmartPolling() {
+            if (pollTimer) clearTimeout(pollTimer);
+            const hasActiveQueue = (quotaState.recent_queue || []).some(q => q.status === 'PENDING' || q.status === 'PROCESSING');
+            const hasInProgressVideos = videosData.some(v => ['READY', 'INGESTED', 'CLEANED'].includes(v.status));
+            if (hasActiveQueue || hasInProgressVideos) {
+                pollTimer = setTimeout(() => fetchDashboardData(true), 20000);
+            }
+        }
+
+        function updateQuotaUI() {
+            const rem = quotaState.remaining ?? 10;
+            const limit = quotaState.limit ?? 10;
+            const sideBadge = document.getElementById('sidebar-quota-badge');
+            const modalText = document.getElementById('modal-quota-text');
+            const colorCls = rem === 0 ? "text-rose-400" : (rem <= 3 ? "text-amber-300" : "text-cyan-300");
+
+            if (sideBadge) {
+                sideBadge.className = `${colorCls} font-semibold`;
+                sideBadge.textContent = `${rem} / ${limit} left`;
+            }
+            if (modalText) {
+                modalText.className = `${colorCls} font-bold`;
+                modalText.textContent = `${rem} / ${limit} remaining`;
+            }
+
+            const countInput = document.getElementById('input-count');
+            if (countInput && rem > 0) {
+                countInput.max = String(rem);
+                if (parseInt(countInput.value, 10) > rem) {
+                    countInput.value = String(rem);
+                }
+            }
+
+            // Recent Queue rendering inside modal
+            const queueBox = document.getElementById('recent-queue-box');
+            const queueList = document.getElementById('recent-queue-list');
+            const recent = quotaState.recent_queue || [];
+            if (queueBox && queueList) {
+                if (recent.length > 0) {
+                    queueBox.classList.remove('hidden');
+                    queueList.innerHTML = recent.map(item => {
+                        let badgeCls = "bg-slate-800 text-slate-300 border-slate-700";
+                        if (item.status === "DONE") badgeCls = "bg-emerald-950 text-emerald-300 border-emerald-700/60";
+                        else if (item.status === "PROCESSING") badgeCls = "bg-cyan-950 text-cyan-300 border-cyan-700/60";
+                        else if (item.status === "PENDING") badgeCls = "bg-amber-950 text-amber-300 border-amber-700/60";
+                        else if (item.status === "FAILED") badgeCls = "bg-rose-950 text-rose-300 border-rose-700/60";
+                        return `
+                            <div class="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-slate-900/75 border border-slate-800 text-[11px]">
+                                <span class="text-slate-200 truncate" dir="auto">${escapeHTML(item.topic)} (${item.video_count})</span>
+                                <span class="font-mono text-[10px] px-1.5 py-0.5 rounded border shrink-0 ${badgeCls}">${escapeHTML(item.status)}</span>
+                            </div>
+                        `;
+                    }).join('');
+                } else {
+                    queueBox.classList.add('hidden');
+                }
+            }
+        }
+
+        function updateRAGStatusBadge() {
+            const badge = document.getElementById('rag-status-badge');
+            if (!badge) return;
+            const completedCount = videosData.filter(v => v.status === "COMPLETED").length;
+            if (vectorCount > 0) {
+                badge.textContent = `D1 Server Vector Index: ${vectorCount} Vectors • ${completedCount} Lectures Ready`;
+            } else {
+                badge.textContent = `D1 Hybrid Study Index: ${completedCount} Completed Lectures • Edge Stream Active`;
             }
         }
 
         // --- Sidebar Rendering ---
-        function renderSidebar() {
-            const listEl = document.getElementById('video-list');
-            listEl.innerHTML = ''; 
+        function renderSidebar(videos) {
+            const list = document.getElementById('video-list');
+            const countLabel = document.getElementById('sidebar-count-label');
+            const filtered = videos.filter(v => {
+                if (!searchFilter) return true;
+                const hay = `${v.title || ""} ${v.topic || ""} ${v.status || ""}`.toLowerCase();
+                return hay.includes(searchFilter);
+            });
 
-            allVideos.forEach(vid => {
-                const item = document.createElement('div');
-                const isSelected = currentVideo?.id === vid.id;
-                
-                item.className = `p-3 mb-2 rounded-xl cursor-pointer transition-all border-2 shadow-sm ${isSelected ? 'bg-red-50 border-red-200' : 'bg-white border-transparent hover:border-gray-200 hover:shadow-md'}`;
-                item.dataset.id = vid.id;
-                
-                const title = vid.title || vid.id;
-                const status = vid.status || 'UNKNOWN';
-                
-                let statusColor = 'bg-gray-100 text-gray-600 border-gray-200';
-                let statusIcon = 'fa-circle-question';
-                if (status === 'COMPLETED') { statusColor = 'bg-green-50 text-green-700 border-green-200'; statusIcon = 'fa-check-circle'; }
-                else if (status.includes('FAILED')) { statusColor = 'bg-red-50 text-red-700 border-red-200'; statusIcon = 'fa-triangle-exclamation'; }
-                else { statusColor = 'bg-yellow-50 text-yellow-700 border-yellow-200'; statusIcon = 'fa-spinner fa-spin'; }
+            if (countLabel) {
+                const doneCount = videos.filter(v => v.status === "COMPLETED").length;
+                countLabel.textContent = `${doneCount}/${videos.length} Completed`;
+            }
 
-                item.innerHTML = `
-                    <h3 class="text-sm font-bold text-gray-800 line-clamp-2 leading-tight">${title}</h3>
-                    <div class="flex items-center justify-between mt-3">
-                        <span class="text-[10px] font-bold px-2 py-0.5 rounded border uppercase flex items-center gap-1 ${statusColor}">
-                            <i class="fa-solid ${statusIcon}"></i> ${status}
-                        </span>
-                        ${vid.flashcards ? `<span class="text-[10px] font-bold text-primary bg-white px-2 py-0.5 rounded border border-red-100 shadow-sm"><i class="fa-regular fa-clone mr-1"></i>${vid.flashcards.length}</span>` : ''}
+            list.innerHTML = '';
+            if (filtered.length === 0) {
+                list.innerHTML = `
+                    <div class="text-center py-10 px-4 text-slate-400 text-xs space-y-2">
+                        <i class="fa-solid fa-database text-2xl text-slate-600"></i>
+                        <p>No lectures in D1 yet.</p>
+                        <p class="text-[11px] text-slate-500">Click "Topic / Video URL & Run" above to generate your first study guide.</p>
                     </div>
                 `;
-                
-                // Event listener added via JS for strict CSP compliance
-                item.addEventListener('click', () => selectVideo(vid.id));
-                listEl.appendChild(item);
-            });
-        }
-
-        // --- Main Content Logic ---
-        window.selectVideo = function(id) {
-            currentVideo = allVideos.find(v => v.id === id);
-            
-            // Highlight active in sidebar
-            document.querySelectorAll('#video-list > div').forEach(el => {
-                if (el.dataset.id === id) {
-                    el.classList.add('bg-red-50', 'border-red-200');
-                    el.classList.remove('bg-white', 'border-transparent');
-                } else {
-                    el.classList.remove('bg-red-50', 'border-red-200');
-                    el.classList.add('bg-white', 'border-transparent');
-                }
-            });
-            
-            document.getElementById('empty-state').classList.add('hidden');
-            document.getElementById('content-area').classList.remove('hidden');
-            document.getElementById('content-area').classList.add('flex');
-
-            document.getElementById('active-topic').textContent = currentVideo.topic || 'General';
-            document.getElementById('active-title').textContent = currentVideo.title || currentVideo.id;
-            
-            const dateStr = currentVideo.completed_at ? new Date(currentVideo.completed_at).toLocaleDateString() : 'Pending Processing';
-            document.getElementById('active-date').innerHTML = `<i class="fa-regular fa-calendar text-gray-400 mr-2"></i> <span class="font-medium">${dateStr}</span>`;
-            
-            const modelName = currentVideo.llm_model_used ? currentVideo.llm_model_used.replace('models/', '') : 'N/A';
-            document.getElementById('active-model').innerHTML = `<i class="fa-solid fa-microchip text-primary mr-2"></i> <span class="font-medium">${modelName}</span>`;
-
-            renderFlashcards();
-            renderStudyGuide();
-            
-            // Force reset to flashcards view
-            switchTab('flashcards');
-        }
-
-        function renderFlashcards() {
-            const container = document.getElementById('view-flashcards');
-            container.innerHTML = '';
-            
-            const cards = currentVideo.flashcards || [];
-            
-            if(cards.length === 0) {
-                container.innerHTML = `
-                    <div class="col-span-full flex flex-col items-center justify-center py-20 text-gray-400">
-                        <i class="fa-solid fa-layer-group text-5xl mb-4 text-gray-300"></i>
-                        <p class="text-lg font-medium">No Flashcards Yet</p>
-                        <p class="text-sm mt-1">If the video is still processing, check back later.</p>
-                    </div>`;
                 return;
             }
+
+            filtered.forEach(video => {
+                let statusColor = "bg-slate-400";
+                const statusLabel = video.status || "UNKNOWN";
+                if (statusLabel === "COMPLETED") statusColor = "bg-emerald-400";
+                else if (statusLabel === "CLEANED") statusColor = "bg-amber-400";
+                else if (statusLabel.includes("FAILED")) statusColor = "bg-rose-500";
+                else if (statusLabel === "READY" || statusLabel === "INGESTED") statusColor = "bg-sky-400";
+
+                const evalScore = video.telemetry?.eval?.overall_score;
+                const evalTag = evalScore
+                    ? `<span class="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-emerald-950/90 text-emerald-400 border border-emerald-700/60">Eval ${evalScore}/10</span>`
+                    : '';
+
+                const isSelected = currentSelectedVideo && currentSelectedVideo.id === video.id;
+                const card = document.createElement('div');
+                card.className = `p-3.5 rounded-2xl border ${isSelected ? 'border-cyan-400/70 bg-indigo-950/50 shadow-lg shadow-indigo-950/40' : 'border-slate-700/70'} glass-card cursor-pointer hover:border-indigo-400/60 transition-all group`;
+                card.dataset.id = video.id;
+
+                card.innerHTML = `
+                    <div class="flex justify-between items-center mb-1.5 gap-2">
+                        <span class="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full bg-slate-950/80 border border-slate-700 flex items-center gap-1.5">
+                            <span class="w-1.5 h-1.5 rounded-full ${statusColor}"></span>
+                            ${escapeHTML(statusLabel)}
+                        </span>
+                        ${evalTag}
+                    </div>
+                    <h3 class="text-sm font-medium text-slate-100 line-clamp-2 group-hover:text-cyan-300 transition-colors" dir="auto">${escapeHTML(video.title || video.id)}</h3>
+                    <div class="flex items-center justify-between text-[10px] text-slate-400 mt-1.5">
+                        <span class="truncate max-w-[70%]" dir="auto">${escapeHTML(video.topic || 'General')}</span>
+                        ${video.rag_indexed ? '<span class="text-cyan-400 font-mono">RAG ✓</span>' : ''}
+                    </div>
+                `;
+
+                card.addEventListener('click', () => {
+                    selectVideo(video.id);
+                    closeMobileSidebar();
+                });
+                list.appendChild(card);
+            });
+        }
+
+        document.getElementById('sidebar-search')?.addEventListener('input', (e) => {
+            searchFilter = e.target.value.trim().toLowerCase();
+            renderSidebar(videosData);
+        });
+
+        function selectVideo(id) {
+            currentSelectedVideo = videosData.find(v => v.id === id);
+            renderSidebar(videosData);
+
+            const evalBadge = document.getElementById('eval-badge-header');
+            if (currentSelectedVideo?.telemetry?.eval?.overall_score) {
+                evalBadge.classList.remove('hidden');
+                evalBadge.classList.add('flex');
+                document.getElementById('header-eval-score').textContent = `${currentSelectedVideo.telemetry.eval.overall_score}/10`;
+            } else {
+                evalBadge.classList.add('hidden');
+                evalBadge.classList.remove('flex');
+            }
+
+            if (currentSelectedVideo?.status === "COMPLETED") {
+                document.getElementById('tab-summary').classList.remove('hidden');
+                document.getElementById('tab-flashcards').classList.remove('hidden');
+                switchTab('summary');
+                window.triggerBrainPulse?.(1.1);
+            } else {
+                document.getElementById('tab-summary').classList.add('hidden');
+                document.getElementById('tab-flashcards').classList.add('hidden');
+                currentTab = 'pending';
+                document.getElementById('main-content').innerHTML = `
+                    <div class="h-full flex flex-col items-center justify-center text-slate-300">
+                        <div class="p-7 rounded-3xl glass-panel border border-slate-700 text-center max-w-md space-y-3">
+                            <i class="fa-solid fa-hourglass-half text-3xl text-cyan-400 animate-pulse"></i>
+                            <h3 class="text-lg font-bold text-white" dir="auto">${escapeHTML(currentSelectedVideo?.title || 'Processing Lecture')}</h3>
+                            <p class="text-sm">Current Status: <span class="font-mono text-cyan-300 font-semibold">${escapeHTML(currentSelectedVideo?.status || 'UNKNOWN')}</span></p>
+                            ${currentSelectedVideo?.error_log ? `<p class="text-xs font-mono text-rose-300 bg-rose-950/60 border border-rose-500/30 p-3 rounded-xl text-left break-words">${escapeHTML(currentSelectedVideo.error_log)}</p>` : ''}
+                            <p class="text-xs text-slate-400">Auto-polling D1 every 20s — unlocks automatically once COMPLETED.</p>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        function switchTab(tabName) {
+            currentTab = tabName;
+            const tabs = {
+                summary: document.getElementById('tab-summary'),
+                flashcards: document.getElementById('tab-flashcards'),
+                rag: document.getElementById('tab-rag'),
+                telemetry: document.getElementById('tab-telemetry')
+            };
+
+            Object.entries(tabs).forEach(([key, btn]) => {
+                if (!btn) return;
+                if (key === tabName) {
+                    btn.className = "tab-btn text-cyan-300 border-b-2 border-cyan-400 pb-1 font-semibold text-sm transition-colors whitespace-nowrap";
+                } else {
+                    btn.className = btn.classList.contains('hidden')
+                        ? "tab-btn hidden"
+                        : "tab-btn text-slate-400 hover:text-slate-200 border-b-2 border-transparent pb-1 font-medium text-sm transition-colors whitespace-nowrap";
+                }
+            });
+
+            if (tabName === 'summary') renderSummary();
+            else if (tabName === 'flashcards') renderFlashcards();
+            else if (tabName === 'rag') renderRAGChat();
+            else if (tabName === 'telemetry') renderTelemetry();
+        }
+
+        // --- Tab 1: Summary & Study Notes ---
+        function renderSummary() {
+            const main = document.getElementById('main-content');
+            const sections = currentSelectedVideo?.study_guide_sections || [];
+            if (sections.length === 0) {
+                main.innerHTML = `<p class="text-center text-slate-400 mt-12">No study guide sections available for this lecture.</p>`;
+                return;
+            }
+
+            const ytUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(currentSelectedVideo.id)}`;
+            const evalInfo = currentSelectedVideo?.telemetry?.eval;
+            const evalBanner = evalInfo ? `
+                <div class="mb-6 p-4 rounded-2xl bg-slate-950/75 border border-indigo-500/35 flex flex-wrap items-center justify-between gap-4 text-xs">
+                    <div class="max-w-xl">
+                        <span class="text-cyan-300 font-semibold block mb-1"><i class="fa-solid fa-shield-halved mr-1"></i>LLM-as-a-Judge Quality Audit</span>
+                        <span class="text-slate-300 leading-relaxed">${escapeHTML(evalInfo.reasoning || 'Verified against lecture transcript.')}</span>
+                    </div>
+                    <div class="flex flex-wrap gap-3 font-mono">
+                        <div class="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700"><span class="text-slate-400">Faithfulness:</span> <span class="text-emerald-400 font-bold">${evalInfo.faithfulness}/10</span></div>
+                        <div class="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700"><span class="text-slate-400">Schema:</span> <span class="text-indigo-400 font-bold">${evalInfo.schema_adherence}/10</span></div>
+                        <div class="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700"><span class="text-slate-400">Pedagogy:</span> <span class="text-purple-400 font-bold">${evalInfo.question_quality}/10</span></div>
+                    </div>
+                </div>
+            ` : '';
+
+            const sectionsHTML = sections.map((sec, i) => `
+                <article class="mb-8 pb-6 border-b border-slate-700/60 last:border-0 last:mb-0 last:pb-0">
+                    <h2 class="text-lg sm:text-xl font-bold text-cyan-300 mb-3" dir="auto">${i + 1}. ${escapeHTML(sec.section_title)}</h2>
+                    <p class="text-slate-200 leading-relaxed mb-4 text-sm sm:text-base" dir="auto">${escapeHTML(sec.summary)}</p>
+                    ${sec.key_takeaways?.length ? `
+                        <div class="mb-3">
+                            <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">Key Exam Takeaways</h4>
+                            <ul class="list-disc ml-5 space-y-1.5 text-sm text-slate-300" dir="auto">
+                                ${sec.key_takeaways.map(t => `<li>${escapeHTML(t)}</li>`).join('')}
+                            </ul>
+                        </div>
+                    ` : ''}
+                    ${sec.formulas_or_definitions?.length ? `
+                        <div class="bg-slate-950/80 border border-purple-500/35 rounded-xl p-4 mt-3">
+                            <h4 class="text-xs font-bold uppercase tracking-wider text-purple-300 mb-2"><i class="fa-solid fa-square-root-variable mr-1.5"></i>Formulas &amp; Definitions</h4>
+                            <ul class="space-y-1.5 font-mono text-xs text-slate-200">
+                                ${sec.formulas_or_definitions.map(f => `<li>&bull; ${escapeHTML(f)}</li>`).join('')}
+                            </ul>
+                        </div>
+                    ` : ''}
+                </article>
+            `).join('');
+
+            main.innerHTML = `
+                <div class="max-w-3xl mx-auto glass-panel p-6 sm:p-8 rounded-3xl shadow-2xl border border-slate-700/80">
+                    <div class="flex flex-wrap items-center justify-between gap-2 pb-5 mb-6 border-b border-slate-700/70">
+                        <div>
+                            <span class="text-[11px] font-mono uppercase tracking-wider text-indigo-300" dir="auto">${escapeHTML(currentSelectedVideo.topic || 'Study Guide')}</span>
+                            <h1 class="text-xl sm:text-2xl font-bold text-white mt-1" dir="auto">${escapeHTML(currentSelectedVideo.title)}</h1>
+                        </div>
+                        <a href="${ytUrl}" target="_blank" rel="noopener noreferrer" class="text-xs font-mono bg-rose-950/70 hover:bg-rose-900 text-rose-300 border border-rose-500/40 px-3 py-1.5 rounded-xl transition-colors">
+                            <i class="fa-brands fa-youtube mr-1"></i>Watch Video
+                        </a>
+                    </div>
+                    ${evalBanner}
+                    ${sectionsHTML}
+                </div>
+            `;
+        }
+
+        // --- Tab 2: Interactive 3D Flashcards ---
+        function renderFlashcards() {
+            const main = document.getElementById('main-content');
+            const cards = currentSelectedVideo?.flashcards || [];
+            if (cards.length === 0) {
+                main.innerHTML = `<p class="text-center text-slate-400 mt-12">No flashcards generated for this lecture.</p>`;
+                return;
+            }
+
+            let html = `
+                <div class="max-w-6xl mx-auto space-y-4">
+                    <p class="text-xs font-mono text-slate-400"><i class="fa-solid fa-hand-pointer mr-1.5 text-cyan-400"></i>Click or tap any card to flip in 3D (${cards.length} cards)</p>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            `;
 
             cards.forEach((card, index) => {
-                const diffLabel = card.difficulty || 'Medium';
-                const diffColor = diffLabel.toLowerCase() === 'hard' ? 'text-red-700 bg-red-100 border-red-200' : 
-                                 diffLabel.toLowerCase() === 'easy' ? 'text-green-700 bg-green-100 border-green-200' : 
-                                 'text-yellow-700 bg-yellow-100 border-yellow-200';
-
-                const cardHTML = `
-                    <div class="flip-card h-72 w-full group">
-                        <div class="flip-card-inner">
-                            <!-- Front (Question) -->
-                            <div class="flip-card-front text-center group-hover:shadow-xl transition-shadow">
-                                <span class="absolute top-4 right-4 text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded border shadow-sm ${diffColor}">${diffLabel}</span>
-                                <span class="absolute top-4 left-4 text-sm font-black text-gray-200">Q${index + 1}</span>
-                                <p class="text-secondary font-semibold text-lg px-4 leading-relaxed">${card.front}</p>
-                                <div class="absolute bottom-4 text-[10px] uppercase font-bold text-gray-400 tracking-widest bg-gray-50 px-3 py-1 rounded-full border border-gray-100">
-                                    <i class="fa-solid fa-rotate mr-1"></i> Flip to Reveal
-                                </div>
+                html += `
+                    <div class="perspective-1000 h-64 group cursor-pointer" data-card-idx="${index}">
+                        <div class="relative w-full h-full transform-style-3d">
+                            <div class="absolute w-full h-full backface-hidden glass-panel border border-indigo-500/35 hover:border-cyan-400/60 rounded-2xl p-6 flex flex-col items-center justify-center text-center shadow-xl transition-colors">
+                                <span class="absolute top-4 left-4 text-[10px] font-mono text-cyan-300 bg-cyan-950/80 px-2.5 py-0.5 rounded-lg border border-cyan-500/30">${escapeHTML(card.difficulty || 'Medium')}</span>
+                                <span class="absolute top-4 right-4 text-xs font-bold text-slate-400 bg-slate-900 px-2 py-0.5 rounded-lg">Q${index + 1}</span>
+                                <p class="text-sm sm:text-base font-medium text-white leading-relaxed mt-3" dir="auto">${escapeHTML(card.front)}</p>
                             </div>
-                            <!-- Back (Answer) -->
-                            <div class="flip-card-back text-center overflow-y-auto">
-                                <span class="absolute top-4 left-4 text-sm font-black text-gray-300"><i class="fa-solid fa-lightbulb text-yellow-400 mr-1"></i> Answer</span>
-                                <p class="text-secondary text-base px-4 leading-relaxed mt-4 font-medium">${card.back}</p>
+                            <div class="absolute w-full h-full backface-hidden glass-panel bg-indigo-950/75 border border-cyan-400/60 rounded-2xl p-6 flex flex-col items-center justify-center text-center shadow-xl rotate-y-180">
+                                <span class="absolute top-4 right-4 text-xs font-bold text-cyan-300 bg-indigo-950 px-2 py-0.5 rounded-lg border border-cyan-500/30">Answer</span>
+                                <p class="text-sm text-indigo-100 leading-relaxed overflow-y-auto scrollbar-hide mt-4" dir="auto">${escapeHTML(card.back)}</p>
                             </div>
                         </div>
                     </div>
                 `;
-                container.insertAdjacentHTML('beforeend', cardHTML);
+            });
+            html += `</div></div>`;
+            main.innerHTML = html;
+
+            document.querySelectorAll('[data-card-idx]').forEach(el => {
+                el.addEventListener('click', function () {
+                    const inner = this.querySelector('.transform-style-3d');
+                    inner.style.transform = inner.style.transform === 'rotateY(180deg)' ? 'rotateY(0deg)' : 'rotateY(180deg)';
+                    window.triggerBrainPulse?.(0.7);
+                });
             });
         }
 
-        function renderStudyGuide() {
-            const container = document.getElementById('view-guide');
-            container.innerHTML = '';
+        // --- Tab 3: Server-Side Cloudflare D1 Edge RAG Tutor ---
+        function appendHistoryBubble(container, msg) {
+            const wrapper = document.createElement('div');
+            if (msg.role === 'user') {
+                wrapper.className = "flex justify-end";
+                const bubble = document.createElement('div');
+                bubble.className = "max-w-xl bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-4 py-3 rounded-2xl rounded-br-none text-sm shadow-lg leading-relaxed";
+                bubble.setAttribute('dir', 'auto');
+                bubble.textContent = msg.text;
+                wrapper.appendChild(bubble);
+            } else {
+                wrapper.className = "flex justify-start";
+                const citationsHTML = (msg.citations || []).map(c => `
+                    <span class="inline-flex items-center gap-1.5 text-[11px] font-mono bg-slate-950/85 border border-indigo-500/40 text-indigo-300 px-2.5 py-1 rounded-lg">
+                        <i class="fa-solid fa-book-open text-cyan-400 text-[10px]"></i>
+                        ${escapeHTML(c.video_title)} &rarr; ${escapeHTML(c.section_title)}
+                        <span class="text-emerald-400">(${escapeHTML(c.similarity)})</span>
+                    </span>
+                `).join('');
 
-            const sections = currentVideo.study_guide_sections || [];
-            if(sections.length === 0) {
-                container.innerHTML = `
-                    <div class="flex flex-col items-center justify-center py-20 text-gray-400">
-                        <i class="fa-solid fa-file-lines text-5xl mb-4 text-gray-300"></i>
-                        <p class="text-lg font-medium">Study Guide is Empty</p>
-                    </div>`;
+                wrapper.innerHTML = `
+                    <div class="max-w-3xl glass-card border border-slate-700/80 p-5 rounded-2xl rounded-bl-none space-y-3 shadow-xl w-full">
+                        <div class="stream-answer-text text-sm text-slate-100 leading-relaxed whitespace-pre-line" dir="auto"></div>
+                        <div class="stream-citations ${citationsHTML ? '' : 'hidden'} flex flex-wrap gap-2 pt-2.5 border-t border-slate-700/60">${citationsHTML}</div>
+                        <div class="stream-meta ${msg.metaHTML ? '' : 'hidden'} flex flex-wrap items-center gap-4 text-[11px] font-mono text-slate-400 pt-1">${msg.metaHTML || ''}</div>
+                    </div>
+                `;
+                wrapper.querySelector('.stream-answer-text').textContent = msg.text;
+            }
+            container.appendChild(wrapper);
+            container.scrollTop = container.scrollHeight;
+            return wrapper;
+        }
+
+        function renderRAGChat() {
+            const main = document.getElementById('main-content');
+            const uniqueTopics = [...new Set(videosData.filter(v => v.status === 'COMPLETED' && v.topic).map(v => v.topic))];
+            const topicOptions = uniqueTopics.map(t => `<option value="${escapeHTML(t)}">${escapeHTML(t)}</option>`).join('');
+
+            main.innerHTML = `
+                <div class="max-w-4xl mx-auto h-full min-h-[480px] flex flex-col glass-panel border border-indigo-500/30 rounded-3xl shadow-2xl overflow-hidden">
+                    <div class="p-4 border-b border-slate-800/90 bg-slate-950/60 flex flex-wrap items-center justify-between gap-3">
+                        <div class="flex items-center gap-3">
+                            <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                            <div>
+                                <h3 class="text-sm font-bold text-white">AI Knowledge Tutor (D1 Server-Side RAG)</h3>
+                                <p id="rag-status-badge" class="text-[11px] text-cyan-300/90 font-mono">Loading D1 index...</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <select id="rag-topic-filter" class="bg-slate-900 border border-slate-700 text-xs text-slate-200 rounded-xl px-2.5 py-1.5 focus:outline-none focus:border-cyan-400 max-w-[180px]">
+                                <option value="">All Topics</option>
+                                ${topicOptions}
+                            </select>
+                            <button id="btn-clear-chat" class="text-xs font-mono text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-xl transition-colors">
+                                <i class="fa-solid fa-trash-can mr-1"></i>Clear
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="rag-messages" class="flex-1 overflow-y-auto custom-scroll p-5 sm:p-6 space-y-5">
+                        <div class="p-4 rounded-2xl glass-card border border-cyan-500/25 text-sm text-slate-200 leading-relaxed" dir="auto">
+                            <i class="fa-solid fa-sparkles text-cyan-400 mr-1.5"></i>
+                            <strong>سلام! من دستیار هوشمند جزوه‌های شما هستم (متصل به Cloudflare D1).</strong><br>
+                            سوال خود را به فارسی یا انگلیسی بپرسید تا جستجوی برداری مستقیماً در سرور کلودفلر انجام شود و پاسخ همراه با منبع دقیق ویدیو به صورت زنده استریم شود.
+                        </div>
+                    </div>
+
+                    <div class="p-4 border-t border-slate-800/90 bg-slate-950/70">
+                        <div class="flex gap-2.5">
+                            <input type="text" id="rag-input" dir="auto" placeholder="سوال خود را از جزوه‌ها بپرسید (Persian or English)..." class="flex-1 bg-slate-900/95 border border-slate-700 text-white text-sm rounded-xl px-4 py-3 focus:outline-none focus:border-cyan-400 transition-colors">
+                            <button id="btn-send-rag" class="bg-gradient-to-r from-cyan-600 via-indigo-600 to-purple-600 hover:from-cyan-500 hover:to-purple-500 text-white px-5 sm:px-6 py-3 rounded-xl text-sm font-semibold shadow-lg transition-all shrink-0">
+                                Ask Live <i class="fa-solid fa-paper-plane ml-1"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            updateRAGStatusBadge();
+            const container = document.getElementById('rag-messages');
+            chatHistory.forEach(msg => appendHistoryBubble(container, msg));
+
+            document.getElementById('btn-clear-chat').addEventListener('click', () => {
+                chatHistory = [];
+                renderRAGChat();
+                showToast("تاریخچه گفتگو پاک شد.", "info");
+            });
+
+            const inputEl = document.getElementById('rag-input');
+            const sendBtn = document.getElementById('btn-send-rag');
+            const handleSend = () => executeServerSideRAG(inputEl.value.trim());
+            sendBtn.addEventListener('click', handleSend);
+            inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleSend(); });
+        }
+
+        async function executeServerSideRAG(userQuery) {
+            if (!userQuery) return;
+            const inputEl = document.getElementById('rag-input');
+            const sendBtn = document.getElementById('btn-send-rag');
+            const topicFilter = document.getElementById('rag-topic-filter')?.value || null;
+            const container = document.getElementById('rag-messages');
+
+            inputEl.value = "";
+            sendBtn.disabled = true;
+            sendBtn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i>`;
+            window.triggerBrainPulse?.(2.2);
+
+            const userMsg = { role: 'user', text: userQuery };
+            chatHistory.push(userMsg);
+            appendHistoryBubble(container, userMsg);
+
+            const botRecord = { role: 'assistant', text: '⚡ در حال جستجوی معنایی روی سرور Cloudflare D1 و استریم پاسخ...', citations: [], metaHTML: '' };
+            const botWrapper = appendHistoryBubble(container, botRecord);
+            const textEl = botWrapper.querySelector('.stream-answer-text');
+            const citEl = botWrapper.querySelector('.stream-citations');
+            const metaEl = botWrapper.querySelector('.stream-meta');
+
+            const t0 = performance.now();
+            try {
+                const payload = { query: userQuery };
+                if (topicFilter) payload.topic = topicFilter;
+
+                const streamRes = await fetch(`${WORKER_URL}/api/chat`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!streamRes.ok) {
+                    let errMsg = `HTTP ${streamRes.status}`;
+                    try {
+                        const errJson = await streamRes.json();
+                        errMsg = errJson.error || errMsg;
+                    } catch {
+                        errMsg = await streamRes.text();
+                    }
+                    throw new Error(errMsg);
+                }
+
+                textEl.textContent = "";
+                botRecord.text = "";
+
+                const reader = streamRes.body.getReader();
+                const decoder = new TextDecoder("utf-8");
+                let buffer = "";
+                let totalTok = 0;
+                let retrievalMode = "D1 Edge RAG";
+                let topSim = 0;
+                let modelUsed = "Gemini";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split("\n");
+                    buffer = lines.pop() || "";
+
+                    for (const line of lines) {
+                        if (!line.startsWith("data: ")) continue;
+                        const jsonStr = line.slice(6).trim();
+                        if (!jsonStr || jsonStr === "[DONE]") continue;
+
+                        try {
+                            const parsed = JSON.parse(jsonStr);
+
+                            if (parsed.eduextract_meta) {
+                                const m = parsed.eduextract_meta;
+                                botRecord.citations = m.citations || [];
+                                retrievalMode = m.mode || retrievalMode;
+                                topSim = m.top_similarity || 0;
+                                modelUsed = m.model_used || modelUsed;
+
+                                if (botRecord.citations.length > 0) {
+                                    citEl.classList.remove('hidden');
+                                    citEl.innerHTML = botRecord.citations.map(c => `
+                                        <span class="inline-flex items-center gap-1.5 text-[11px] font-mono bg-slate-950/85 border border-indigo-500/40 text-indigo-300 px-2.5 py-1 rounded-lg">
+                                            <i class="fa-solid fa-book-open text-cyan-400 text-[10px]"></i>
+                                            ${escapeHTML(c.video_title)} &rarr; ${escapeHTML(c.section_title)}
+                                            <span class="text-emerald-400">(${escapeHTML(c.similarity)})</span>
+                                        </span>
+                                    `).join('');
+                                }
+                                continue;
+                            }
+
+                            const delta = parsed.candidates?.[0]?.content?.parts?.[0]?.text || "";
+                            if (delta) {
+                                botRecord.text += delta;
+                                textEl.textContent = botRecord.text;
+                                container.scrollTop = container.scrollHeight;
+                            }
+                            if (parsed.usageMetadata) {
+                                totalTok = (parsed.usageMetadata.promptTokenCount || 0) + (parsed.usageMetadata.candidatesTokenCount || 0);
+                            }
+                        } catch (_) {}
+                    }
+                }
+
+                if (!botRecord.text) {
+                    botRecord.text = "پاسخی از مدل دریافت نشد. لطفاً دوباره امتحان کنید.";
+                    textEl.textContent = botRecord.text;
+                }
+
+                const latencySec = ((performance.now() - t0) / 1000).toFixed(2);
+                botRecord.metaHTML = `
+                    <span><i class="fa-solid fa-bolt text-cyan-400 mr-1"></i>Latency: <strong class="text-cyan-300">${latencySec}s</strong></span>
+                    <span><i class="fa-solid fa-coins text-amber-400 mr-1"></i>Tokens: <strong class="text-white">${totalTok.toLocaleString()}</strong></span>
+                    <span><i class="fa-solid fa-bullseye text-indigo-400 mr-1"></i>Top Match: <strong class="text-indigo-300">${Number(topSim).toFixed(3)} (${escapeHTML(retrievalMode)})</strong></span>
+                    <span><i class="fa-solid fa-microchip text-emerald-400 mr-1"></i>${escapeHTML(modelUsed)}</span>
+                `;
+                metaEl.classList.remove('hidden');
+                metaEl.innerHTML = botRecord.metaHTML;
+                chatHistory.push(botRecord);
+            } catch (err) {
+                botRecord.text = "❌ خطا: " + err.message;
+                textEl.textContent = botRecord.text;
+            } finally {
+                sendBtn.disabled = false;
+                sendBtn.innerHTML = `Ask Live <i class="fa-solid fa-paper-plane ml-1"></i>`;
+            }
+        }
+
+        // --- Tab 4: Compute & Hardware Telemetry ---
+        function renderTelemetry() {
+            const main = document.getElementById('main-content');
+            const completedVideos = videosData.filter(v => v.status === "COMPLETED");
+
+            let totalInputTokens = 0, totalOutputTokens = 0, totalLatency = 0;
+            let tpsSum = 0, tpsCount = 0, peakRamMb = 0, peakVramMb = 0;
+            let cloudCount = 0, localCount = 0, evalSum = 0, evalCount = 0;
+
+            completedVideos.forEach(v => {
+                const t = v.telemetry;
+                if (t) {
+                    totalInputTokens += t.input_tokens || 0;
+                    totalOutputTokens += t.output_tokens || 0;
+                    totalLatency += t.latency_sec || 0;
+                    if (t.throughput_tps) { tpsSum += t.throughput_tps; tpsCount++; }
+                    if (t.compute?.ram_used_mb > peakRamMb) peakRamMb = t.compute.ram_used_mb;
+                    if (t.compute?.vram_used_mb > peakVramMb) peakVramMb = t.compute.vram_used_mb;
+                    if ((t.model_used || "").includes("local")) localCount++; else cloudCount++;
+                    if (t.eval?.overall_score) { evalSum += t.eval.overall_score; evalCount++; }
+                } else {
+                    totalInputTokens += Math.round((v.char_count || 4000) / 4);
+                    totalOutputTokens += 650;
+                    cloudCount++;
+                }
+            });
+
+            const totalTokens = totalInputTokens + totalOutputTokens;
+            const avgLatency = completedVideos.length ? (totalLatency / completedVideos.length).toFixed(2) : "0.00";
+            const avgTps = tpsCount ? (tpsSum / tpsCount).toFixed(1) : "N/A";
+            const avgEval = evalCount ? (evalSum / evalCount).toFixed(1) : "N/A";
+            const totalModels = cloudCount + localCount || 1;
+            const cloudPct = Math.round((cloudCount / totalModels) * 100);
+            const localPct = 100 - cloudPct;
+
+            const rowsHTML = completedVideos.map(v => {
+                const t = v.telemetry || {};
+                const isLocal = (t.model_used || "").includes("local");
+                const hwLabel = t.compute?.accelerator || (isLocal ? 'Local CPU/GPU' : 'Cloud API (TPU)');
+                const memLabel = t.compute?.vram_used_mb > 0
+                    ? `VRAM: ${t.compute.vram_used_mb} MB`
+                    : (t.compute?.ram_used_mb ? `RAM: ${t.compute.ram_used_mb} MB` : '--');
+
+                return `
+                    <tr class="border-b border-slate-800/70 hover:bg-slate-800/40 transition-colors">
+                        <td class="py-3 px-4 text-slate-200 font-medium max-w-xs truncate" dir="auto">${escapeHTML(v.title || v.id)}</td>
+                        <td class="py-3 px-4 font-mono text-xs">
+                            <span class="px-2 py-0.5 rounded-lg ${isLocal ? 'bg-amber-950/90 text-amber-300 border border-amber-700/50' : 'bg-indigo-950/90 text-indigo-300 border border-indigo-700/50'}">${escapeHTML(hwLabel)}</span>
+                        </td>
+                        <td class="py-3 px-4 font-mono text-xs text-slate-300">${(t.total_tokens || 0).toLocaleString()} <span class="text-slate-500">(${t.throughput_tps || '--'} t/s)</span></td>
+                        <td class="py-3 px-4 font-mono text-xs text-cyan-400">${t.latency_sec ? t.latency_sec + 's' : '--'}</td>
+                        <td class="py-3 px-4 font-mono text-xs text-slate-400">${escapeHTML(memLabel)}</td>
+                        <td class="py-3 px-4 font-mono text-xs text-emerald-400">${t.eval?.overall_score ? t.eval.overall_score + '/10' : '--'}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            main.innerHTML = `
+                <div class="max-w-5xl mx-auto space-y-6">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div class="glass-panel border border-slate-700/80 p-5 rounded-2xl">
+                            <p class="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Compute Time (Total / Avg)</p>
+                            <p class="text-2xl font-bold text-cyan-400 mt-2 font-mono">${totalLatency.toFixed(1)}s <span class="text-sm text-slate-400">/ ${avgLatency}s</span></p>
+                            <p class="text-xs text-slate-500 mt-1">End-to-end synthesis + eval</p>
+                        </div>
+                        <div class="glass-panel border border-slate-700/80 p-5 rounded-2xl">
+                            <p class="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Tokens &amp; Throughput</p>
+                            <p class="text-2xl font-bold text-white mt-2 font-mono">${totalTokens.toLocaleString()}</p>
+                            <p class="text-xs text-indigo-400 mt-1">Speed: ${avgTps} tokens/sec</p>
+                        </div>
+                        <div class="glass-panel border border-slate-700/80 p-5 rounded-2xl">
+                            <p class="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Peak Memory Footprint</p>
+                            <p class="text-2xl font-bold text-amber-400 mt-2 font-mono">${peakVramMb > 0 ? peakVramMb + ' MB' : (peakRamMb > 0 ? peakRamMb + ' MB' : 'Cloud')}</p>
+                            <p class="text-xs text-slate-500 mt-1">${peakVramMb > 0 ? 'GPU VRAM Allocated' : 'Runner Process RSS RAM'}</p>
+                        </div>
+                        <div class="glass-panel border border-slate-700/80 p-5 rounded-2xl">
+                            <p class="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Prompt Eval Accuracy</p>
+                            <p class="text-2xl font-bold text-emerald-400 mt-2 font-mono">${avgEval} <span class="text-sm text-slate-500">/ 10</span></p>
+                            <p class="text-xs text-slate-500 mt-1">LLM-as-a-Judge QA Score</p>
+                        </div>
+                    </div>
+
+                    <div class="glass-panel border border-slate-700/80 p-6 rounded-2xl">
+                        <div class="flex flex-wrap justify-between items-center gap-2 mb-3">
+                            <h3 class="text-sm font-semibold text-white">Compute Execution Split (Cloud API vs. Local Fallback)</h3>
+                            <span class="text-xs font-mono text-slate-400">Cloud: ${cloudPct}% (${cloudCount}) | Local: ${localPct}% (${localCount})</span>
+                        </div>
+                        <div class="w-full h-3.5 bg-slate-900 rounded-full overflow-hidden flex border border-slate-700">
+                            <div style="width: ${cloudPct}%" class="bg-gradient-to-r from-cyan-500 to-indigo-500 h-full transition-all duration-500"></div>
+                            <div style="width: ${localPct}%" class="bg-amber-500 h-full transition-all duration-500"></div>
+                        </div>
+                    </div>
+
+                    <div class="glass-panel border border-slate-700/80 rounded-2xl overflow-hidden">
+                        <div class="p-5 border-b border-slate-800 flex items-center justify-between">
+                            <h3 class="text-sm font-semibold text-white">Hardware, Latency &amp; Quality Telemetry Log (D1)</h3>
+                            <span class="text-xs font-mono text-slate-400">${completedVideos.length} Completed Runs</span>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left border-collapse">
+                                <thead>
+                                    <tr class="bg-slate-950/70 text-[11px] uppercase text-slate-400 border-b border-slate-800">
+                                        <th class="py-3 px-4">Video</th>
+                                        <th class="py-3 px-4">Hardware</th>
+                                        <th class="py-3 px-4">Tokens &amp; Speed</th>
+                                        <th class="py-3 px-4">Time</th>
+                                        <th class="py-3 px-4">Memory</th>
+                                        <th class="py-3 px-4">Judge Eval</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="text-sm">
+                                    ${rowsHTML || '<tr><td colspan="6" class="py-8 text-center text-slate-500">No completed runs recorded in D1 yet.</td></tr>'}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // --- Modal & Cloudflare Worker Trigger Logic ---
+        const modal = document.getElementById('request-modal');
+        const modalContent = document.getElementById('modal-content');
+        const statusBox = document.getElementById('dispatch-status');
+        const topicInput = document.getElementById('input-topic');
+        const countInput = document.getElementById('input-count');
+        const directUrlIndicator = document.getElementById('direct-url-indicator');
+
+        topicInput?.addEventListener('input', () => {
+            const val = topicInput.value.trim();
+            const isDirectYt = YT_URL_REGEX.test(val) || /^[A-Za-z0-9_-]{11}$/.test(val);
+            if (isDirectYt) {
+                directUrlIndicator.classList.remove('hidden');
+                countInput.value = "1";
+                countInput.disabled = true;
+                countInput.classList.add('opacity-60');
+            } else {
+                directUrlIndicator.classList.add('hidden');
+                countInput.disabled = false;
+                countInput.classList.remove('opacity-60');
+            }
+        });
+
+        function openModal() {
+            statusBox.classList.add('hidden');
+            updateQuotaUI();
+            modal.classList.remove('hidden');
+            setTimeout(() => {
+                modal.classList.remove('opacity-0');
+                modalContent.classList.remove('scale-95');
+            }, 10);
+        }
+
+        function closeModal() {
+            modal.classList.add('opacity-0');
+            modalContent.classList.add('scale-95');
+            setTimeout(() => modal.classList.add('hidden'), 300);
+        }
+
+        async function submitAndTriggerPipeline() {
+            const topic = topicInput.value.trim();
+            const isDirectYt = YT_URL_REGEX.test(topic) || /^[A-Za-z0-9_-]{11}$/.test(topic);
+            const count = isDirectYt ? 1 : Math.min(10, Math.max(1, parseInt(countInput.value, 10) || 2));
+            const pin = document.getElementById('input-admin-pin')?.value.trim() || "";
+            const btn = document.getElementById('btn-submit-topic');
+
+            if (!topic) {
+                showToast("لطفاً یک موضوع، عنوان ویدیو یا لینک یوتیوب وارد کنید.", "warning");
                 return;
             }
 
-            sections.forEach((sec, index) => {
-                let takeawaysHTML = '';
-                if(sec.key_takeaways && sec.key_takeaways.length > 0) {
-                    takeawaysHTML = `
-                        <div class="mt-5 bg-red-50 p-5 rounded-xl border border-red-100">
-                            <h4 class="text-xs font-bold text-primary mb-3 uppercase tracking-wider flex items-center">
-                                <i class="fa-solid fa-bolt mr-2"></i> Key Takeaways
-                            </h4>
-                            <ul class="space-y-2 text-sm text-gray-700">
-                                ${sec.key_takeaways.map(t => `<li class="flex items-start"><i class="fa-solid fa-check text-green-500 mt-1 mr-2 text-xs"></i><span class="leading-relaxed">${t}</span></li>`).join('')}
-                            </ul>
-                        </div>
-                    `;
-                }
-
-                let formulasHTML = '';
-                if(sec.formulas_or_definitions && sec.formulas_or_definitions.length > 0) {
-                    formulasHTML = `
-                        <div class="mt-4 bg-gray-50 p-5 rounded-xl border border-gray-200">
-                            <h4 class="text-xs font-bold text-secondary mb-3 uppercase tracking-wider flex items-center">
-                                <i class="fa-solid fa-square-root-variable mr-2"></i> Formulas & Definitions
-                            </h4>
-                            <ul class="space-y-2 text-sm font-mono text-gray-800">
-                                ${sec.formulas_or_definitions.map(f => `<li class="bg-white px-3 py-2 border border-gray-200 rounded shadow-sm"><span class="text-primary font-bold mr-2">&rsaquo;</span>${f}</li>`).join('')}
-                            </ul>
-                        </div>
-                    `;
-                }
-
-                const sectionHTML = `
-                    <div class="bg-white p-8 rounded-2xl shadow-sm border border-gray-200 relative overflow-hidden group hover:shadow-md transition-shadow">
-                        <div class="absolute top-0 left-0 w-1.5 h-full bg-primary opacity-80"></div>
-                        <h3 class="text-xl font-bold text-secondary mb-4 flex items-center gap-3">
-                            <span class="bg-gray-100 text-gray-500 rounded-lg w-8 h-8 flex items-center justify-center text-sm font-black">${index + 1}</span>
-                            ${sec.section_title || 'Section Overview'}
-                        </h3>
-                        <p class="text-gray-600 leading-relaxed text-base">${sec.summary || ''}</p>
-                        ${takeawaysHTML}
-                        ${formulasHTML}
-                    </div>
-                `;
-                container.insertAdjacentHTML('beforeend', sectionHTML);
-            });
-        }
-
-        window.switchTab = function(tabName) {
-            const btnFlash = document.getElementById('tab-flashcards');
-            const btnGuide = document.getElementById('tab-guide');
-            const viewFlash = document.getElementById('view-flashcards');
-            const viewGuide = document.getElementById('view-guide');
-
-            const activeStyle = "pb-3 text-sm font-bold border-b-2 border-primary text-primary transition-colors flex items-center";
-            const inactiveStyle = "pb-3 text-sm font-semibold border-b-2 border-transparent text-gray-500 hover:text-gray-800 transition-colors flex items-center";
-
-            if(tabName === 'flashcards') {
-                btnFlash.className = activeStyle;
-                btnGuide.className = inactiveStyle;
-                viewFlash.classList.remove('hidden');
-                viewGuide.classList.add('hidden');
-            } else {
-                btnGuide.className = activeStyle;
-                btnFlash.className = inactiveStyle;
-                viewGuide.classList.remove('hidden');
-                viewFlash.classList.add('hidden');
-            }
-        }
-
-        // --- Search / Config Modal ---
-        window.openSearchModal = function() {
-            const modal = document.getElementById('search-modal');
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
-            setTimeout(() => document.getElementById('topic-input').focus(), 50);
-        }
-
-        window.closeSearchModal = function() {
-            const modal = document.getElementById('search-modal');
-            modal.classList.add('hidden');
-            modal.classList.remove('flex');
-            document.getElementById('search-form').reset();
-        }
-
-        window.submitSearchConfig = async function(e) {
-            e.preventDefault();
-            const btn = document.getElementById('submit-search-btn');
-            const originalContent = btn.innerHTML;
-            
-            const topic = document.getElementById('topic-input').value.trim();
-            const count = parseInt(document.getElementById('count-input').value, 10);
-            
-            if(!topic || isNaN(count)) return;
+            btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin mr-1"></i> Dispatching...`;
+            btn.disabled = true;
+            statusBox.classList.remove('hidden');
+            statusBox.className = "p-3 rounded-xl text-xs font-mono bg-indigo-950/80 text-indigo-300 border border-indigo-500/40";
+            statusBox.textContent = "Checking daily 10-video quota, saving to Cloudflare D1 & starting GitHub Actions...";
+            window.triggerBrainPulse?.(2.5);
 
             try {
-                btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Saving...';
-                btn.disabled = true;
-
-                // Save to Firestore (Requires updated Rules)
-                const configRef = doc(db, "System", "PipelineConfig");
-                await setDoc(configRef, {
-                    target_topic: topic,
-                    top_k_videos: count,
-                    updated_by: "Web Dashboard",
-                    updated_at: new Date().toISOString()
+                const res = await fetch(`${WORKER_URL}/api/trigger`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ topic, count, pin })
                 });
 
-                closeSearchModal();
-                showMsgModal("Configuration Saved!", `Successfully queued pipeline to fetch ${count} videos for:\n\n"${topic}"\n\nPlease go to GitHub and run your workflow to start the automated extraction and generation process.`);
-                
-            } catch (error) {
-                console.error("Config save error:", error);
-                if (error.code === 'permission-denied') {
-                    showMsgModal("Permission Error", "Write access is denied by Firestore Security Rules.\n\nPlease ensure your rules allow write access to the /System/PipelineConfig path.");
-                } else {
-                    showMsgModal("Error", "Could not save configuration: " + error.message);
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || `Worker HTTP ${res.status}`);
                 }
+
+                if (data.triggered) {
+                    statusBox.className = "p-3 rounded-xl text-xs font-mono bg-emerald-950/90 text-emerald-300 border border-emerald-500/50";
+                    statusBox.innerHTML = `✅ Saved to D1 &amp; started GitHub Actions! (Remaining today: ${data.remaining}/10) <a href="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/actions" target="_blank" rel="noopener noreferrer" class="underline font-bold ml-1">View Run ↗</a>`;
+                    showToast("در صف D1 ثبت شد و پایپ‌لاین گیت‌هاب استارت خورد!", "success");
+                } else {
+                    statusBox.className = "p-3 rounded-xl text-xs font-mono bg-amber-950/90 text-amber-300 border border-amber-500/50";
+                    statusBox.textContent = `✅ ${data.message || 'Saved in D1 queue.'}`;
+                    showToast("موضوع در صف D1 ذخیره شد.", "info");
+                }
+
+                topicInput.value = "";
+                directUrlIndicator.classList.add('hidden');
+                countInput.disabled = false;
+                countInput.classList.remove('opacity-60');
+
+                await fetchDashboardData(true);
+            } catch (err) {
+                statusBox.className = "p-3 rounded-xl text-xs font-mono bg-rose-950/90 text-rose-300 border border-rose-500/50";
+                statusBox.textContent = "❌ " + err.message;
+                showToast(err.message, "error");
             } finally {
-                btn.innerHTML = originalContent;
+                btn.innerHTML = `<i class="fa-solid fa-paper-plane mr-1"></i> Save &amp; Run`;
                 btn.disabled = false;
             }
         }
 
-        // --- Utility Modals ---
-        window.showMsgModal = function(title, desc) {
-            document.getElementById('msg-title').innerHTML = `<i class="fa-solid fa-circle-info text-primary"></i> ${title}`;
-            document.getElementById('msg-desc').textContent = desc;
-            document.getElementById('msg-modal').classList.remove('hidden');
-            document.getElementById('msg-modal').classList.add('flex');
-        }
-        
-        window.closeMsgModal = function() {
-            document.getElementById('msg-modal').classList.add('hidden');
-            document.getElementById('msg-modal').classList.remove('flex');
-        }
+        // --- Event Bindings ---
+        document.getElementById('tab-summary')?.addEventListener('click', () => switchTab('summary'));
+        document.getElementById('tab-flashcards')?.addEventListener('click', () => switchTab('flashcards'));
+        document.getElementById('tab-rag')?.addEventListener('click', () => switchTab('rag'));
+        document.getElementById('tab-telemetry')?.addEventListener('click', () => switchTab('telemetry'));
 
-        // --- Event Listeners (Strict CSP Fix) ---
-        function setupEventListeners() {
-            // Tab switching
-            document.getElementById('tab-flashcards').addEventListener('click', () => switchTab('flashcards'));
-            document.getElementById('tab-guide').addEventListener('click', () => switchTab('guide'));
-            
-            // Modals
-            document.getElementById('close-msg-btn').addEventListener('click', closeMsgModal);
-            document.getElementById('btn-open-search').addEventListener('click', openSearchModal);
-            document.getElementById('btn-close-search-top').addEventListener('click', closeSearchModal);
-            document.getElementById('btn-close-search-bottom').addEventListener('click', closeSearchModal);
-            
-            // Form Submit
-            document.getElementById('search-form').addEventListener('submit', submitSearchConfig);
-            
-            // Event delegation for 3D flip cards
-            document.getElementById('view-flashcards').addEventListener('click', (e) => {
-                const card = e.target.closest('.flip-card');
-                if (card) {
-                    card.classList.toggle('flipped');
-                }
-            });
-        }
+        document.getElementById('btn-quick-new')?.addEventListener('click', openModal);
+        document.getElementById('btn-quick-rag')?.addEventListener('click', () => switchTab('rag'));
+        document.getElementById('btn-refresh-d1')?.addEventListener('click', () => fetchDashboardData(false));
 
-        // --- Boot Sequence ---
-        window.addEventListener('DOMContentLoaded', () => {
-            setupEventListeners();
-            initApp();
-        });
+        document.getElementById('btn-open-modal')?.addEventListener('click', openModal);
+        document.getElementById('btn-close-modal')?.addEventListener('click', closeModal);
+        document.getElementById('btn-cancel-modal')?.addEventListener('click', closeModal);
+        document.getElementById('btn-submit-topic')?.addEventListener('click', submitAndTriggerPipeline);
+
+        // Initial Load from Cloudflare D1
+        fetchDashboardData(false);
     </script>
 </body>
 </html>
