@@ -49,6 +49,7 @@ steps:
     env:
       YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
       YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
+      YOUTUBE_PROXY_URL: ${{ secrets.YOUTUBE_PROXY_URL }}
       PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
       CLOUDFLARE_WORKER_URL: https://eduextract-chat.ssa210819.workers.dev
       TARGET_TOPIC: ${{ github.event.inputs.target_topic || '' }}
