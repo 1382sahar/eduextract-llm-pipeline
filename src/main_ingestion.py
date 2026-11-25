@@ -1,19 +1,18 @@
 import os
 import re
 import glob
-import json
 import base64
 import logging
 import tempfile
 import subprocess
 from http.cookiejar import MozillaCookieJar
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import requests
 import yt_dlp
-import firebase_admin
-from firebase_admin import credentials, firestore
+
+from d1_client import D1PipelineClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
@@ -21,71 +20,67 @@ logger = logging.getLogger(__name__)
 
 class EduExtractIngestionPipeline:
     """
-    Unified Layer 0 (Discovery via YouTube API v3) & Layer 1 (Authenticated Transcript Ingestion)
-    integrated with Firebase Firestore state management and dynamic web dashboard config.
+    Unified Layer 0 & Layer 1:
+    - Supports general topic discovery, exact video title lookup, and direct YouTube URLs/IDs.
+    - Extracts transcripts via dual yt-dlp engines (Python API + CLI VTT fallback).
+    - Persists pipeline state and topic queue updates directly to Cloudflare D1.
     """
 
     SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
     VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+    YT_URL_REGEX = re.compile(
+        r"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})"
+    )
+    MAX_TRANSCRIPT_CHARS = 450_000  # Safety cap well below Cloudflare D1's 1MB row limit
 
     def __init__(self, languages: List[str] = ["en", "fa"]):
         self.languages = languages
         self.youtube_api_key = os.getenv("YOUTUBE_API_KEY")
-        self.firebase_b64 = os.getenv("FIREBASE_CREDENTIALS_B64")
         self.cookies_b64 = os.getenv("YOUTUBE_COOKIES_B64")
         self.proxy_url = os.getenv("YOUTUBE_PROXY_URL")
 
         if not self.youtube_api_key:
             raise ValueError("Missing YOUTUBE_API_KEY environment variable!")
 
-        self.db = self._init_firestore()
+        self.d1 = D1PipelineClient()
         self.cookie_file_path = self._prepare_cookie_file()
 
-    def _init_firestore(self) -> firestore.Client:
-        if firebase_admin._apps:
-            return firestore.client()
-
-        if self.firebase_b64:
-            logger.info("Authenticating Firebase via FIREBASE_CREDENTIALS_B64 secret...")
-            cred_dict = json.loads(base64.b64decode(self.firebase_b64).decode("utf-8"))
-            cred = credentials.Certificate(cred_dict)
-        elif os.path.exists("serviceAccountKey.json"):
-            logger.info("Authenticating Firebase via local serviceAccountKey.json...")
-            cred = credentials.Certificate("serviceAccountKey.json")
-        else:
-            raise ValueError("Missing FIREBASE_CREDENTIALS_B64 secret or local serviceAccountKey.json!")
-
-        firebase_admin.initialize_app(cred)
-        return firestore.client()
-
-    def get_remote_config(self) -> tuple[str, int]:
+    def get_target_request(self) -> Tuple[str, int, Optional[Any]]:
         """
-        Fetches the pipeline configuration requested by the user via the Web Dashboard.
-        Falls back to environment variables if the remote config is missing or invalid.
+        Determines target topic / video title / YouTube URL:
+        1. If workflow_dispatch provided TARGET_TOPIC, uses it and links any matching PENDING queue row.
+        2. Otherwise pops the oldest PENDING request from D1 topic_queue.
+        3. Falls back to scheduled default if queue is empty.
         """
-        try:
-            config_ref = self.db.collection("System").document("PipelineConfig")
-            snapshot = config_ref.get()
-            
-            if snapshot.exists:
-                data = snapshot.to_dict()
-                topic = data.get("target_topic")
-                top_k = data.get("top_k_videos", 5)
-                
-                if topic:
-                    # برای امنیت بیشتر، تعداد ویدیوها را به حداکثر 10 محدود می‌کنیم
-                    top_k = min(max(int(top_k), 1), 10)
-                    logger.info(f"[CONFIG] Loaded config from Web Dashboard -> Topic: '{topic}', Count: {top_k}")
-                    return topic, top_k
-                    
-        except Exception as e:
-            logger.error(f"[CONFIG] Error reading remote config: {e}. Falling back to env vars.")
-            
-        # Fallback to env vars
-        fallback_topic = os.getenv("TARGET_TOPIC", "Linear Algebra")
-        fallback_k = int(os.getenv("TOP_K_VIDEOS", "5"))
-        logger.info(f"[CONFIG] Using fallback env config -> Topic: '{fallback_topic}', Count: {fallback_k}")
-        return fallback_topic, fallback_k
+        env_topic = (os.getenv("TARGET_TOPIC") or "").strip()
+        env_k = (os.getenv("TOP_K_VIDEOS") or "").strip()
+        pending_queue = self.d1.get_pending_queue()
+
+        if env_topic:
+            top_k = min(max(int(env_k or 3), 1), 10)
+            matched_id = None
+            for item in pending_queue:
+                if str(item.get("topic", "")).strip().lower() == env_topic.lower():
+                    matched_id = item.get("id")
+                    break
+            logger.info(
+                f"[CONFIG] Using workflow input -> Target: '{env_topic}', Count: {top_k} "
+                f"(queue_id={matched_id})"
+            )
+            return env_topic, top_k, matched_id
+
+        if pending_queue:
+            first = pending_queue[0]
+            topic = str(first.get("topic", "")).strip()
+            top_k = min(max(int(first.get("video_count") or 3), 1), 10)
+            queue_id = first.get("id")
+            logger.info(f"[CONFIG] Loaded from D1 topic_queue (#{queue_id}) -> Target: '{topic}', Count: {top_k}")
+            return topic, top_k, queue_id
+
+        fallback_topic = "Linear Algebra"
+        fallback_k = 2
+        logger.info(f"[CONFIG] Queue empty; using scheduled default -> Topic: '{fallback_topic}', Count: {fallback_k}")
+        return fallback_topic, fallback_k, None
 
     def _prepare_cookie_file(self) -> Optional[str]:
         if not self.cookies_b64 or not self.cookies_b64.strip():
@@ -109,7 +104,7 @@ class EduExtractIngestionPipeline:
         session = requests.Session()
         session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9"
+            "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
         })
         if self.cookie_file_path:
             cj = MozillaCookieJar(self.cookie_file_path)
@@ -127,21 +122,107 @@ class EduExtractIngestionPipeline:
         h, m, s = int(match.group(1) or 0), int(match.group(2) or 0), int(match.group(3) or 0)
         return round(h * 60 + m + (s / 60), 1)
 
-    def discover_top_videos(self, topic: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        logger.info(f"Searching YouTube API v3 for topic: '{topic}'...")
-        search_params = {
-            "part": "snippet",
-            "q": f"{topic} lecture tutorial explained",
-            "type": "video",
-            "videoCaption": "closedCaption",
-            "relevanceLanguage": "en",
-            "order": "viewCount",
-            "maxResults": 20,
-            "key": self.youtube_api_key
+    def _extract_direct_video_id(self, user_input: str) -> Optional[str]:
+        cleaned = user_input.strip()
+        match = self.YT_URL_REGEX.search(cleaned)
+        if match:
+            return match.group(1)
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", cleaned):
+            return cleaned
+        return None
+
+    @staticmethod
+    def _is_specific_title_query(query: str, top_k: int) -> bool:
+        """
+        Detects when the user supplied a specific video title (e.g., exact lecture name,
+        quoted string, non-ASCII/Persian title, or single-video search) rather than a broad topic.
+        """
+        q = query.strip()
+        if top_k == 1:
+            return True
+        if any(ch in q for ch in ('"', "'", "|", ":", " - ", "—")):
+            return True
+        if any(ord(ch) > 127 for ch in q):  # Persian or other non-English title/topic
+            return True
+        if len(q.split()) >= 5:
+            return True
+        return False
+
+    def fetch_single_video_metadata(self, video_id: str) -> List[Dict[str, Any]]:
+        logger.info(f"[DIRECT VIDEO] Fetching metadata for YouTube Video ID: {video_id}")
+        stats_params = {
+            "part": "snippet,statistics,contentDetails",
+            "id": video_id,
+            "key": self.youtube_api_key,
         }
+        resp = requests.get(self.VIDEOS_URL, params=stats_params, timeout=15)
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+
+        if not items:
+            return [{
+                "video_id": video_id,
+                "title": f"YouTube Video ({video_id})",
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "topic": "Direct Video",
+            }]
+
+        item = items[0]
+        snippet = item.get("snippet", {})
+        stats = item.get("statistics", {})
+        title = snippet.get("title") or f"YouTube Video ({video_id})"
+
+        return [{
+            "video_id": video_id,
+            "title": title,
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+            "channel": snippet.get("channelTitle"),
+            "view_count": int(stats.get("viewCount", 0)),
+            "like_count": int(stats.get("likeCount", 0)),
+            "duration_minutes": self._parse_iso_duration(item.get("contentDetails", {}).get("duration", "")),
+            "topic": title[:80],
+        }]
+
+    def _search_youtube_ids(self, query: str, specific_mode: bool, require_cc: bool) -> List[str]:
+        search_params: Dict[str, Any] = {
+            "part": "snippet",
+            "q": query if specific_mode else f"{query} lecture tutorial explained",
+            "type": "video",
+            "order": "relevance" if specific_mode else "viewCount",
+            "maxResults": 10 if specific_mode else 20,
+            "key": self.youtube_api_key,
+        }
+        if require_cc:
+            search_params["videoCaption"] = "closedCaption"
+        if not specific_mode:
+            search_params["relevanceLanguage"] = "en"
+
         resp = requests.get(self.SEARCH_URL, params=search_params, timeout=15)
         resp.raise_for_status()
-        video_ids = [item["id"]["videoId"] for item in resp.json().get("items", []) if "videoId" in item.get("id", {})]
+        return [
+            item["id"]["videoId"]
+            for item in resp.json().get("items", [])
+            if "videoId" in item.get("id", {})
+        ]
+
+    def discover_top_videos(self, topic: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        # 1. Direct YouTube URL or 11-character Video ID
+        direct_id = self._extract_direct_video_id(topic)
+        if direct_id:
+            return self.fetch_single_video_metadata(direct_id)
+
+        # 2. Specific Video Title vs Broad Educational Topic
+        specific_mode = self._is_specific_title_query(topic, top_k)
+        clean_query = topic.strip().strip('"').strip("'")
+        logger.info(
+            f"Searching YouTube API v3 ({'EXACT TITLE' if specific_mode else 'TOPIC DISCOVERY'}): '{clean_query}'..."
+        )
+
+        # In specific title mode, don't filter out videos that only have auto-generated captions
+        video_ids = self._search_youtube_ids(clean_query, specific_mode=specific_mode, require_cc=not specific_mode)
+        if not video_ids:
+            logger.info("No closed-caption results found; retrying broad relevance search...")
+            video_ids = self._search_youtube_ids(clean_query, specific_mode=True, require_cc=False)
 
         if not video_ids:
             return []
@@ -149,19 +230,25 @@ class EduExtractIngestionPipeline:
         stats_params = {
             "part": "snippet,statistics,contentDetails",
             "id": ",".join(video_ids),
-            "key": self.youtube_api_key
+            "key": self.youtube_api_key,
         }
         stats_resp = requests.get(self.VIDEOS_URL, params=stats_params, timeout=15)
         stats_resp.raise_for_status()
 
+        items_by_id = {item["id"]: item for item in stats_resp.json().get("items", [])}
+        min_duration = 1.0 if specific_mode else 4.0
+
         candidates = []
-        for item in stats_resp.json().get("items", []):
-            vid_id = item["id"]
+        for rank_idx, vid_id in enumerate(video_ids):
+            item = items_by_id.get(vid_id)
+            if not item:
+                continue
+
             snippet = item.get("snippet", {})
             stats = item.get("statistics", {})
             duration_min = self._parse_iso_duration(item.get("contentDetails", {}).get("duration", ""))
 
-            if duration_min < 4.0:
+            if duration_min < min_duration:
                 continue
 
             views = int(stats.get("viewCount", 0))
@@ -177,8 +264,13 @@ class EduExtractIngestionPipeline:
                 "like_count": likes,
                 "duration_minutes": duration_min,
                 "engagement_score": score,
-                "topic": topic
+                "relevance_rank": rank_idx,
+                "topic": clean_query[:80],
             })
+
+        if specific_mode:
+            # Preserve YouTube's relevance ranking so exact video titles come first
+            return candidates[:top_k]
 
         ranked = sorted(candidates, key=lambda x: x["engagement_score"], reverse=True)
         return ranked[:top_k]
@@ -195,14 +287,13 @@ class EduExtractIngestionPipeline:
             "check_formats": False,
             "writesubtitles": True,
             "writeautomaticsub": True,
-            "subtitleslangs": ["en.*", "en", "fa"],
+            "subtitleslangs": ["en.*", "en", "fa.*", "fa"],
             "quiet": True,
             "no_warnings": True,
         }
 
         if self.cookie_file_path:
             ydl_opts["cookiefile"] = self.cookie_file_path
-
         if self.proxy_url:
             ydl_opts["proxy"] = self.proxy_url
 
@@ -215,18 +306,23 @@ class EduExtractIngestionPipeline:
             auto_subs = info.get("automatic_captions") or {}
 
             tracks = None
-            # Check manual English subtitles first
-            for key in subs:
-                if key == "en" or key.startswith("en-"):
-                    tracks = subs[key]
-                    break
-            # Then check automatic English captions
-            if not tracks:
-                for key in auto_subs:
-                    if key == "en" or key.startswith("en-"):
-                        tracks = auto_subs[key]
+            for lang in self.languages:
+                for key in subs:
+                    if key == lang or key.startswith(f"{lang}-"):
+                        tracks = subs[key]
                         break
-            # Fallback to any available subtitle track
+                if tracks:
+                    break
+
+            if not tracks:
+                for lang in self.languages:
+                    for key in auto_subs:
+                        if key == lang or key.startswith(f"{lang}-"):
+                            tracks = auto_subs[key]
+                            break
+                    if tracks:
+                        break
+
             if not tracks:
                 all_tracks = list(subs.values()) + list(auto_subs.values())
                 if all_tracks:
@@ -255,7 +351,7 @@ class EduExtractIngestionPipeline:
 
             if len(text) < 50:
                 raise ValueError("Extracted transcript is too short/empty.")
-            return text
+            return text[: self.MAX_TRANSCRIPT_CHARS]
 
     def _fetch_ytdlp_cli_fallback(self, video_id: str) -> str:
         """
@@ -271,10 +367,10 @@ class EduExtractIngestionPipeline:
                 "--ignore-no-formats-error",
                 "--write-subs",
                 "--write-auto-subs",
-                "--sub-langs", "en.*,en",
+                "--sub-langs", "en.*,en,fa.*,fa",
                 "--sub-format", "vtt",
                 "-o", out_template,
-                url
+                url,
             ]
             if self.cookie_file_path:
                 cmd.extend(["--cookies", self.cookie_file_path])
@@ -307,9 +403,9 @@ class EduExtractIngestionPipeline:
             full_text = " ".join(lines)
             if len(full_text) < 50:
                 raise ValueError("CLI VTT transcript was empty.")
-            return full_text
+            return full_text[: self.MAX_TRANSCRIPT_CHARS]
 
-    def extract_transcript(self, video_id: str) -> tuple[str, str]:
+    def extract_transcript(self, video_id: str) -> Tuple[str, str]:
         """Tries Engine 1 (yt-dlp Python API) -> Engine 2 (yt-dlp CLI Disk Writer)."""
         try:
             return self._fetch_ytdlp_python(video_id), "yt-dlp-python"
@@ -317,46 +413,52 @@ class EduExtractIngestionPipeline:
             logger.warning(f"Engine 1 failed for {video_id} ({type(e1).__name__}: {e1}). Trying Engine 2 (yt-dlp CLI)...")
             return self._fetch_ytdlp_cli_fallback(video_id), "yt-dlp-cli"
 
-    def run(self, topic: str, top_k: int = 5):
+    def run(self, topic: str, top_k: int = 5) -> int:
+        existing_videos = {v["id"]: v.get("status", "UNKNOWN") for v in self.d1.get_videos()}
         top_videos = self.discover_top_videos(topic=topic, top_k=top_k)
-        col_ref = self.db.collection("Pipeline_State")
 
+        if not top_videos:
+            logger.warning(f"No matching YouTube videos found for '{topic}'.")
+            return 0
+
+        success_count = 0
         for vid in top_videos:
             vid_id = vid["video_id"]
-            doc_ref = col_ref.document(vid_id)
-            snapshot = doc_ref.get()
+            current_status = existing_videos.get(vid_id)
 
-            # ==============================================================
-            # SYSTEM STATE LOCK: جلوگیری از رونویسی ویدیوهای پردازش‌شده
-            # ==============================================================
-            if snapshot.exists:
-                current_status = snapshot.to_dict().get("status", "UNKNOWN")
-                if current_status in ["READY", "INGESTED", "EXTRACTED", "CLEANED", "SYNTHESIS_FAILED", "COMPLETED"]:
-                    logger.info(f"[SKIP] Video {vid_id} already in state: '{current_status}'. Preserving lifecycle.")
-                    continue
-            # ==============================================================
+            # SYSTEM STATE LOCK: preserve videos already ingested or processed
+            if current_status in ["READY", "INGESTED", "EXTRACTED", "CLEANED", "SYNTHESIS_FAILED", "COMPLETED"]:
+                logger.info(f"[SKIP] Video {vid_id} already in D1 state: '{current_status}'. Preserving lifecycle.")
+                success_count += 1
+                continue
 
             logger.info(f"Extracting transcript for: {vid['title']} ({vid_id})...")
             try:
                 transcript_text, engine = self.extract_transcript(vid_id)
-                vid.update({
-                    "transcript": transcript_text,
+                self.d1.upsert_video({
+                    "id": vid_id,
+                    "title": vid["title"] or vid_id,
+                    "topic": vid.get("topic") or topic[:80],
+                    "status": "READY",
+                    "raw_transcript": transcript_text,
                     "char_count": len(transcript_text),
-                    "ingestion_engine": engine,
-                    "status": "READY",  # آماده برای پردازش در لایه دوم
-                    "error_log": firestore.DELETE_FIELD,
-                    "updated_at": datetime.now(timezone.utc).isoformat()
+                    "error_log": None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
-                doc_ref.set(vid, merge=True)
-                logger.info(f"[SUCCESS] Stored {vid_id} ({len(transcript_text):,} chars via {engine}) in Firestore as READY.")
+                success_count += 1
+                logger.info(f"[SUCCESS] Stored {vid_id} ({len(transcript_text):,} chars via {engine}) in D1 as READY.")
             except Exception as e:
                 logger.error(f"[FAILED] Could not extract transcript for {vid_id}: {e}")
-                vid.update({
+                self.d1.upsert_video({
+                    "id": vid_id,
+                    "title": vid["title"] or vid_id,
+                    "topic": vid.get("topic") or topic[:80],
                     "status": "INGESTION_FAILED",
-                    "error_log": str(e),
-                    "updated_at": datetime.now(timezone.utc).isoformat()
+                    "error_log": str(e)[:1000],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
-                doc_ref.set(vid, merge=True)
+
+        return success_count
 
     def cleanup(self):
         if self.cookie_file_path and os.path.exists(self.cookie_file_path):
@@ -365,12 +467,18 @@ class EduExtractIngestionPipeline:
 
 if __name__ == "__main__":
     pipeline = EduExtractIngestionPipeline()
-    
-    # 1. خواندن موضوع از داشبورد وب
-    target_topic, top_count = pipeline.get_remote_config()
-    
+    target_topic, top_count, queue_id = pipeline.get_target_request()
+
+    if queue_id is not None:
+        pipeline.d1.mark_topic_status(queue_id, "PROCESSING")
+
     try:
-        # 2. اجرای استخراج
-        pipeline.run(topic=target_topic, top_k=top_count)
+        ingested = pipeline.run(topic=target_topic, top_k=top_count)
+        if queue_id is not None:
+            pipeline.d1.mark_topic_status(queue_id, "DONE" if ingested > 0 else "FAILED")
+    except Exception:
+        if queue_id is not None:
+            pipeline.d1.mark_topic_status(queue_id, "FAILED")
+        raise
     finally:
         pipeline.cleanup()

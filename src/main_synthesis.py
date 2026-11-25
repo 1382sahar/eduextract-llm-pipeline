@@ -3,7 +3,6 @@ import re
 import csv
 import json
 import time
-import base64
 import platform
 import logging
 from datetime import datetime, timezone
@@ -14,9 +13,6 @@ try:
 except ImportError:
     psutil = None
 
-import firebase_admin
-from firebase_admin import credentials, firestore
-from google.cloud.firestore_v1.base_query import FieldFilter
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -24,6 +20,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from fpdf import FPDF
 
+from d1_client import D1PipelineClient
 from prompts import (
     GEMINI_WHOLE_VIDEO_PROMPT,
     LOCAL_LLM_SYSTEM_PROMPT,
@@ -77,7 +74,7 @@ class LocalHuggingFaceBackup:
         self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
         self.model = AutoModelForCausalLM.from_pretrained(
             self.MODEL_ID,
-            dtype=torch.float32
+            dtype=torch.float32,
         )
         self.model.eval()
         logger.info("[LOCAL BACKUP] Local model ready.")
@@ -103,9 +100,9 @@ class LocalHuggingFaceBackup:
                     video_title=video_title,
                     topic=topic,
                     chunk_idx=chunk_idx + 1,
-                    trimmed_text=trimmed_text
-                )
-            }
+                    trimmed_text=trimmed_text,
+                ),
+            },
         ]
 
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -117,7 +114,7 @@ class LocalHuggingFaceBackup:
                 **inputs,
                 max_new_tokens=550,
                 temperature=0.2,
-                do_sample=True
+                do_sample=True,
             )
 
         output_ids = generated_ids[0][in_tokens:]
@@ -176,7 +173,7 @@ class StudyGuidePDF(FPDF):
 
 class EduExtractLayer3Synthesizer:
     def __init__(self):
-        self.db = self._init_firestore()
+        self.d1 = D1PipelineClient()
         api_key = os.getenv("GEMINI_API_KEY")
         self.client: Optional[genai.Client] = genai.Client(api_key=api_key) if api_key else None
         self.model = self._select_active_gemini_model() if self.client else None
@@ -190,23 +187,6 @@ class EduExtractLayer3Synthesizer:
 
         os.makedirs("artifacts/pdf", exist_ok=True)
         os.makedirs("artifacts/flashcards", exist_ok=True)
-
-    @staticmethod
-    def _init_firestore() -> firestore.Client:
-        if firebase_admin._apps:
-            return firestore.client()
-
-        firebase_b64 = os.getenv("FIREBASE_CREDENTIALS_B64")
-        if firebase_b64:
-            cred_dict = json.loads(base64.b64decode(firebase_b64).decode("utf-8"))
-            cred = credentials.Certificate(cred_dict)
-        elif os.path.exists("serviceAccountKey.json"):
-            cred = credentials.Certificate("serviceAccountKey.json")
-        else:
-            raise ValueError("Missing FIREBASE_CREDENTIALS_B64 secret or local serviceAccountKey.json!")
-
-        firebase_admin.initialize_app(cred)
-        return firestore.client()
 
     @staticmethod
     def _get_compute_metrics(is_local_model: bool) -> Dict[str, Any]:
@@ -257,9 +237,7 @@ class EduExtractLayer3Synthesizer:
     def _synthesize_whole_video_with_gemini(
         self, chunks: List[Dict[str, Any]], video_title: str, topic: str
     ) -> Tuple[VideoSynthesis, int, int]:
-        """
-        Sends all chunks of a video in ONE single Gemini request and returns exact token counts.
-        """
+        """Sends all chunks of a video in ONE single Gemini request and returns exact token counts."""
         if not self.client or not self.model or self.gemini_quota_exhausted:
             raise RuntimeError("Gemini unavailable or daily quota exhausted.")
 
@@ -273,7 +251,7 @@ class EduExtractLayer3Synthesizer:
             video_title=video_title,
             topic=topic,
             chunk_count=len(chunks),
-            combined_transcript=combined_transcript
+            combined_transcript=combined_transcript,
         )
 
         for attempt in range(1, 3):
@@ -354,7 +332,7 @@ class EduExtractLayer3Synthesizer:
                     "section_title": sec_dict["section_title"],
                     "summary": sec_dict["summary"],
                     "key_takeaways": sec_dict["key_takeaways"],
-                    "formulas_or_definitions": sec_dict["formulas_or_definitions"]
+                    "formulas_or_definitions": sec_dict["formulas_or_definitions"],
                 })
                 all_flashcards.extend(sec_dict["flashcards"])
             used_model = self.model
@@ -380,13 +358,13 @@ class EduExtractLayer3Synthesizer:
                     "section_title": sec_dict["section_title"],
                     "summary": sec_dict["summary"],
                     "key_takeaways": sec_dict["key_takeaways"],
-                    "formulas_or_definitions": sec_dict["formulas_or_definitions"]
+                    "formulas_or_definitions": sec_dict["formulas_or_definitions"],
                 })
                 all_flashcards.extend(sec_dict["flashcards"])
             used_model = f"local:{LocalHuggingFaceBackup.MODEL_ID}"
 
         # --- Automated QA Evaluation (LLM-as-a-Judge) ---
-        schema_adherence = 10.0  # Guaranteed by Pydantic response_schema validation
+        schema_adherence = 10.0
         faithfulness = 8.5
         question_quality = 8.5
         eval_reasoning = "Validated via Pydantic schema heuristic (local fallback mode)."
@@ -431,7 +409,7 @@ class EduExtractLayer3Synthesizer:
         title: str,
         topic: str,
         sections: List[Dict[str, Any]],
-        flashcards: List[Dict[str, Any]]
+        flashcards: List[Dict[str, Any]],
     ) -> str:
         pdf = StudyGuidePDF(video_title=title, topic=topic)
         pdf.add_page()
@@ -490,7 +468,7 @@ class EduExtractLayer3Synthesizer:
                 pdf.write_block(f"A: {card.get('back', '')}", line_height=6)
                 pdf.ln(3)
 
-        safe_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", title)[:45].strip("_")
+        safe_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", title)[:45].strip("_") or vid_id
         out_path = f"artifacts/pdf/{vid_id}_{safe_slug}.pdf"
         pdf.output(out_path)
         return out_path
@@ -505,16 +483,15 @@ class EduExtractLayer3Synthesizer:
         return csv_path
 
     def run(self):
-        col_ref = self.db.collection("Pipeline_State")
-        docs = list(col_ref.where(filter=FieldFilter("status", "in", ["CLEANED", "SYNTHESIS_FAILED"])).get())
+        videos = self.d1.get_videos_by_statuses(["CLEANED", "SYNTHESIS_FAILED"])
+        logger.info(f"Layer 3 fetched {len(videos)} videos ready for synthesis from D1.")
 
         synthesized_count = 0
-        for doc in docs:
-            data = doc.to_dict()
-            vid_id = doc.id
-            title = data.get("title", vid_id)
-            topic = data.get("topic", "General")
-            chunks = data.get("chunks", [])
+        for data in videos:
+            vid_id = data["id"]
+            title = data.get("title") or vid_id
+            topic = data.get("topic") or "General"
+            chunks = data.get("chunks") or []
 
             if not chunks:
                 logger.warning(f"[SKIP] {vid_id} has no semantic chunks.")
@@ -527,19 +504,19 @@ class EduExtractLayer3Synthesizer:
                 )
 
                 pdf_path = self.generate_pdf(vid_id, title, topic, study_sections, all_flashcards)
-                csv_path = self.export_anki_csv(vid_id, all_flashcards)
+                self.export_anki_csv(vid_id, all_flashcards)
 
-                doc.reference.update({
+                # Clear chunks_json after synthesis to keep Cloudflare D1 rows compact and fast
+                self.d1.update_video(vid_id, {
                     "study_guide_sections": study_sections,
                     "flashcards": all_flashcards,
                     "flashcard_count": len(all_flashcards),
-                    "llm_model_used": used_model,
                     "telemetry": telemetry,
+                    "chunks_json": None,
                     "status": "COMPLETED",
-                    "error_log": firestore.DELETE_FIELD,
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }, timeout=60.0)
+                    "error_log": None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
 
                 synthesized_count += 1
                 logger.info(
@@ -551,11 +528,11 @@ class EduExtractLayer3Synthesizer:
 
             except Exception as e:
                 logger.error(f"[FAILED] Layer 3 synthesis error for {vid_id}: {e}")
-                doc.reference.update({
+                self.d1.update_video(vid_id, {
                     "status": "SYNTHESIS_FAILED",
-                    "error_log": str(e),
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }, timeout=60.0)
+                    "error_log": str(e)[:1000],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
 
         logger.info(f"Layer 3 complete. Total videos synthesized: {synthesized_count}")
 

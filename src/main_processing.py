@@ -1,14 +1,12 @@
 import os
 import re
 import json
-import base64
 import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
-import firebase_admin
-from firebase_admin import credentials, firestore
 from transformers import pipeline
+from d1_client import D1PipelineClient
 
 try:
     from groq import Groq
@@ -21,26 +19,43 @@ logger = logging.getLogger(__name__)
 
 class SmartASRCorrector:
     """
-    Self-learning ASR error corrector backed by Firestore cache.
+    Self-learning ASR error corrector backed by a local JSON cache (cached across GitHub runs).
     Applies cached regex rules first (0 tokens), then optionally uses Groq JSON mode
-    to discover new domain-specific phonetic typos and persists them to Firestore.
+    to discover new domain-specific phonetic typos and persists them to disk.
     """
 
-    def __init__(self, db: firestore.Client):
-        self.db = db
+    def __init__(self, cache_path: str = "artifacts/asr_glossary_cache.json"):
+        self.cache_path = cache_path
+        os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
         self.groq_api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=self.groq_api_key) if (Groq and self.groq_api_key) else None
         self.model = "llama-3.1-8b-instant"
+        self._cache: Dict[str, Dict[str, str]] = self._load_all_cache()
 
-    def _get_cache_ref(self, topic: str):
-        doc_id = re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_") or "general"
-        return self.db.collection("ASR_Glossary_Cache").document(doc_id)
+    @staticmethod
+    def _topic_key(topic: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_") or "general"
+
+    def _load_all_cache(self) -> Dict[str, Dict[str, str]]:
+        if os.path.exists(self.cache_path):
+            try:
+                with open(self.cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+            except Exception as e:
+                logger.warning(f"Could not read ASR glossary cache: {e}")
+        return {}
+
+    def _save_all_cache(self) -> None:
+        try:
+            with open(self.cache_path, "w", encoding="utf-8") as f:
+                json.dump(self._cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not write ASR glossary cache: {e}")
 
     def load_cached_glossary(self, topic: str) -> Dict[str, str]:
-        doc = self._get_cache_ref(topic).get()
-        if doc.exists:
-            return doc.to_dict().get("mappings", {})
-        return {}
+        return dict(self._cache.get(self._topic_key(topic), {}))
 
     @staticmethod
     def apply_glossary(text: str, glossary: Dict[str, str]) -> str:
@@ -72,15 +87,16 @@ class SmartASRCorrector:
                 response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": sample_text}
-                ]
+                    {"role": "user", "content": sample_text},
+                ],
             )
             data = json.loads(resp.choices[0].message.content)
             raw_new = data.get("corrections", {})
             return {
                 k.lower().strip(): v.strip()
                 for k, v in raw_new.items()
-                if isinstance(k, str) and isinstance(v, str)
+                if isinstance(k, str)
+                and isinstance(v, str)
                 and k.lower().strip() != v.lower().strip()
                 and k.lower().strip() not in existing_glossary
             }
@@ -97,54 +113,41 @@ class SmartASRCorrector:
         if new_mappings:
             logger.info(f"[CACHE UPDATE] Learned {len(new_mappings)} new ASR rules for '{topic}': {new_mappings}")
             text = self.apply_glossary(text, new_mappings)
-            self._get_cache_ref(topic).set({"mappings": new_mappings}, merge=True)
+            key = self._topic_key(topic)
+            merged = self._cache.get(key, {})
+            merged.update(new_mappings)
+            self._cache[key] = merged
+            self._save_all_cache()
 
         return text
 
 
 class EduExtractLayer2Processor:
     """
-    Layer 2 Pipeline:
-    1. Fetch INGESTED/READY transcripts from Firestore.
+    Layer 2 Pipeline (Cloudflare D1):
+    1. Fetch INGESTED/READY transcripts from D1.
     2. Strip audio artifacts, spoken fillers, and stutters.
     3. Apply cached + self-learning ASR corrections.
     4. Restore punctuation & sentence capitalization locally via HuggingFace transformers pipeline.
-    5. Split into sentence-aware overlapping semantic chunks and update Firestore status to CLEANED.
+    5. Split into sentence-aware overlapping semantic chunks and update D1 status to CLEANED.
     """
 
     def __init__(self):
-        self.db = self._init_firestore()
-        self.asr_corrector = SmartASRCorrector(self.db)
+        self.d1 = D1PipelineClient()
+        self.asr_corrector = SmartASRCorrector()
 
         logger.info("Loading local punctuation model (oliverguhr/fullstop-punctuation-multilang-large)...")
         self.punct_pipe = pipeline(
             "token-classification",
             model="oliverguhr/fullstop-punctuation-multilang-large",
-            aggregation_strategy="none"
+            aggregation_strategy="none",
         )
 
         fillers = [
             r"uh+", r"um+", r"er+", r"ah+",
-            r"you know", r"i mean", r"sort of", r"kind of", r"so basically"
+            r"you know", r"i mean", r"sort of", r"kind of", r"so basically",
         ]
         self.filler_pattern = re.compile(r"\b(?:" + "|".join(fillers) + r")\b", re.IGNORECASE)
-
-    @staticmethod
-    def _init_firestore() -> firestore.Client:
-        if firebase_admin._apps:
-            return firestore.client()
-
-        firebase_b64 = os.getenv("FIREBASE_CREDENTIALS_B64")
-        if firebase_b64:
-            cred_dict = json.loads(base64.b64decode(firebase_b64).decode("utf-8"))
-            cred = credentials.Certificate(cred_dict)
-        elif os.path.exists("serviceAccountKey.json"):
-            cred = credentials.Certificate("serviceAccountKey.json")
-        else:
-            raise ValueError("Missing FIREBASE_CREDENTIALS_B64 secret or local serviceAccountKey.json!")
-
-        firebase_admin.initialize_app(cred)
-        return firestore.client()
 
     def clean_noise_and_fillers(self, raw_text: str) -> str:
         text = re.sub(r"\[.*?\]|\(.*?\)", " ", raw_text)
@@ -165,11 +168,10 @@ class EduExtractLayer2Processor:
         step = max(1, chunk_words - overlap_words)
 
         for start in range(0, len(words), step):
-            window_words = words[start:start + chunk_words]
+            window_words = words[start : start + chunk_words]
             window_text = " ".join(window_words)
             predictions = self.punct_pipe(window_text)
 
-            # نگاشت پیش‌بینی توکن‌ها به کلمات پنجره جاری
             word_labels = ["0"] * len(window_words)
             char_spans = []
             cursor = 0
@@ -186,7 +188,6 @@ class EduExtractLayer2Processor:
                         word_labels[w_idx] = label
                         break
 
-            # حذف توکن‌های هم‌پوشان (Overlap) به جز اولین پنجره
             emit_start = 0 if start == 0 else overlap_words
             for w_idx in range(emit_start, len(window_words)):
                 w = window_words[w_idx]
@@ -201,7 +202,6 @@ class EduExtractLayer2Processor:
 
     def restore_punctuation_and_casing(self, text: str) -> str:
         punctuated = self._predict_punctuation_chunked(text)
-        # بزرگ کردن حرف اول هر جمله بعد از . یا ? یا !
         parts = re.split(r"([.!?]+\s+)", punctuated)
         restored = "".join(
             part[0].upper() + part[1:] if (i % 2 == 0 and part) else part
@@ -213,7 +213,7 @@ class EduExtractLayer2Processor:
     def semantic_sentence_chunker(
         text: str,
         target_words: int = 900,
-        overlap_sentences: int = 2
+        overlap_sentences: int = 2,
     ) -> List[Dict[str, Any]]:
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
         if not sentences:
@@ -232,7 +232,7 @@ class EduExtractLayer2Processor:
                     "chunk_index": len(chunks),
                     "text": chunk_text,
                     "word_count": len(chunk_text.split()),
-                    "sentence_count": len(current_sentences)
+                    "sentence_count": len(current_sentences),
                 })
                 current_sentences = current_sentences[-overlap_sentences:] if overlap_sentences > 0 else []
                 current_word_count = sum(len(s.split()) for s in current_sentences)
@@ -246,53 +246,54 @@ class EduExtractLayer2Processor:
                 "chunk_index": len(chunks),
                 "text": chunk_text,
                 "word_count": len(chunk_text.split()),
-                "sentence_count": len(current_sentences)
+                "sentence_count": len(current_sentences),
             })
 
         return chunks
 
     def run(self):
-        col_ref = self.db.collection("Pipeline_State")
-        docs = col_ref.where("status", "in", ["INGESTED", "READY"]).stream()
+        videos = self.d1.get_videos_by_statuses(["INGESTED", "READY"])
+        logger.info(f"Layer 2 fetched {len(videos)} videos ready for cleaning from D1.")
 
         processed_count = 0
-        for doc in docs:
-            data = doc.to_dict()
-            vid_id = doc.id
-            raw_transcript = data.get("transcript", "")
-            topic = data.get("topic", "General")
+        for data in videos:
+            vid_id = data["id"]
+            raw_transcript = data.get("raw_transcript") or ""
+            topic = data.get("topic") or "General"
+            title = data.get("title") or vid_id
 
             if not raw_transcript or len(raw_transcript.strip()) < 50:
-                logger.warning(f"[SKIP] {vid_id} has empty or invalid transcript.")
+                logger.warning(f"[SKIP] {vid_id} has empty or invalid raw_transcript.")
                 continue
 
-            logger.info(f"Processing Layer 2 for: {data.get('title', vid_id)} ({vid_id})...")
+            logger.info(f"Processing Layer 2 for: {title} ({vid_id})...")
             try:
                 denoised_text = self.clean_noise_and_fillers(raw_transcript)
                 asr_fixed_text = self.asr_corrector.process(denoised_text, topic=topic)
                 cleaned_transcript = self.restore_punctuation_and_casing(asr_fixed_text)
                 chunks = self.semantic_sentence_chunker(cleaned_transcript, target_words=900, overlap_sentences=2)
 
-                doc.reference.update({
-                    "cleaned_transcript": cleaned_transcript,
-                    "cleaned_char_count": len(cleaned_transcript),
+                # Clear raw_transcript once chunked so D1 rows remain compact (<1MB)
+                self.d1.update_video(vid_id, {
                     "chunks": chunks,
-                    "chunk_count": len(chunks),
+                    "raw_transcript": None,
+                    "char_count": len(cleaned_transcript),
                     "status": "CLEANED",
-                    "cleaned_at": datetime.now(timezone.utc).isoformat()
+                    "error_log": None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
                 processed_count += 1
                 logger.info(
                     f"[SUCCESS] {vid_id} cleaned ({len(cleaned_transcript):,} chars) "
-                    f"and split into {len(chunks)} semantic chunks."
+                    f"and split into {len(chunks)} semantic chunks in D1."
                 )
 
             except Exception as e:
                 logger.error(f"[FAILED] Layer 2 error for {vid_id}: {e}")
-                doc.reference.update({
+                self.d1.update_video(vid_id, {
                     "status": "CLEANING_FAILED",
-                    "error_log": str(e),
-                    "updated_at": datetime.now(timezone.utc).isoformat()
+                    "error_log": str(e)[:1000],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
 
         logger.info(f"Layer 2 complete. Total videos processed: {processed_count}")

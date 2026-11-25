@@ -1,20 +1,16 @@
-# src/main_rag_indexer.py
 import os
-import json
 import time
 import uuid
-import base64
 import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
-import firebase_admin
-from firebase_admin import credentials, firestore
-from google.cloud.firestore_v1.base_query import FieldFilter
 from google import genai
 from google.genai import types
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
+
+from d1_client import D1PipelineClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
@@ -25,7 +21,7 @@ class EduExtractLayer4RAGIndexer:
     EMBEDDING_DIM = 768
 
     def __init__(self, qdrant_path: str = "artifacts/qdrant_db"):
-        self.db = self._init_firestore()
+        self.d1 = D1PipelineClient()
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("Missing GEMINI_API_KEY environment variable!")
@@ -37,23 +33,6 @@ class EduExtractLayer4RAGIndexer:
         os.makedirs(qdrant_path, exist_ok=True)
         self.qdrant = QdrantClient(path=qdrant_path)
         self._ensure_qdrant_collection()
-
-    @staticmethod
-    def _init_firestore() -> firestore.Client:
-        if firebase_admin._apps:
-            return firestore.client()
-
-        firebase_b64 = os.getenv("FIREBASE_CREDENTIALS_B64")
-        if firebase_b64:
-            cred_dict = json.loads(base64.b64decode(firebase_b64).decode("utf-8"))
-            cred = credentials.Certificate(cred_dict)
-        elif os.path.exists("serviceAccountKey.json"):
-            cred = credentials.Certificate("serviceAccountKey.json")
-        else:
-            raise ValueError("Missing FIREBASE_CREDENTIALS_B64 secret or local serviceAccountKey.json!")
-
-        firebase_admin.initialize_app(cred)
-        return firestore.client()
 
     def _select_embedding_model(self) -> str:
         try:
@@ -84,11 +63,11 @@ class EduExtractLayer4RAGIndexer:
             logger.info(f"Created Qdrant collection '{self.COLLECTION_NAME}' (dim={self.EMBEDDING_DIM}).")
 
     def _embed_batch(self, texts: List[str], batch_size: int = 20) -> List[List[float]]:
-        """تولید بردار ۷۶۸ بُعدی به صورت دسته‌ای برای جلوگیری از محدودیت نرخ درخواست"""
+        """Generates 768-D embeddings in batches to respect Gemini API rate limits."""
         all_vectors: List[List[float]] = []
 
         for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
+            batch = texts[i : i + batch_size]
             try:
                 response = self.client.models.embed_content(
                     model=self.embedding_model,
@@ -102,7 +81,7 @@ class EduExtractLayer4RAGIndexer:
                 )
 
             for emb in response.embeddings:
-                all_vectors.append([float(v) for v in emb.values[:self.EMBEDDING_DIM]])
+                all_vectors.append([float(v) for v in emb.values[: self.EMBEDDING_DIM]])
 
             if i + batch_size < len(texts):
                 time.sleep(1)
@@ -114,10 +93,10 @@ class EduExtractLayer4RAGIndexer:
         return str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
 
     def _build_chunks_for_video(self, vid_id: str, data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        video_title = data.get("title", vid_id)
-        topic = data.get("topic", "General")
-        sections = data.get("study_guide_sections", [])
-        flashcards = data.get("flashcards", [])
+        video_title = data.get("title") or vid_id
+        topic = data.get("topic") or "General"
+        sections = data.get("study_guide_sections") or []
+        flashcards = data.get("flashcards") or []
 
         chunks: List[Dict[str, Any]] = []
 
@@ -168,36 +147,28 @@ class EduExtractLayer4RAGIndexer:
         return chunks
 
     def run(self):
-        state_col = self.db.collection("Pipeline_State")
-        vector_col = self.db.collection("RAG_Vectors")
-
-        docs = list(state_col.where(filter=FieldFilter("status", "==", "COMPLETED")).get())
-        logger.info(f"Found {len(docs)} COMPLETED videos. Checking RAG index state...")
+        videos = self.d1.get_videos(status="COMPLETED", rag_indexed=False)
+        logger.info(f"Found {len(videos)} COMPLETED unindexed videos in D1.")
 
         indexed_videos = 0
         total_vectors = 0
 
-        for doc in docs:
-            data = doc.to_dict()
-            vid_id = doc.id
-
-            if data.get("rag_indexed") is True:
-                logger.info(f"[SKIP] {vid_id} already indexed.")
-                continue
-
+        for data in videos:
+            vid_id = data["id"]
             chunks = self._build_chunks_for_video(vid_id, data)
             if not chunks:
                 logger.warning(f"[SKIP] {vid_id} has no study sections or flashcards to index.")
                 continue
 
-            title = data.get("title", vid_id)
+            title = data.get("title") or vid_id
             logger.info(f"Embedding {len(chunks)} chunks for '{title}' ({vid_id})...")
 
             try:
                 vectors = self._embed_batch([c["content"] for c in chunks])
-                qdrant_points: List[qmodels.PointStruct] = []
-                batch = self.db.batch()
                 now_iso = datetime.now(timezone.utc).isoformat()
+
+                qdrant_points: List[qmodels.PointStruct] = []
+                d1_vector_rows: List[Dict[str, Any]] = []
 
                 for item, vec in zip(chunks, vectors):
                     qdrant_points.append(
@@ -215,8 +186,8 @@ class EduExtractLayer4RAGIndexer:
                         )
                     )
 
-                    vec_ref = vector_col.document(item["chunk_id"])
-                    batch.set(vec_ref, {
+                    d1_vector_rows.append({
+                        "chunk_id": item["chunk_id"],
                         "video_id": item["video_id"],
                         "video_title": item["video_title"],
                         "topic": item["topic"],
@@ -229,27 +200,26 @@ class EduExtractLayer4RAGIndexer:
                     })
 
                 self.qdrant.upsert(collection_name=self.COLLECTION_NAME, points=qdrant_points)
-                batch.commit()
+                self.d1.upsert_vectors(d1_vector_rows, batch_size=10)
 
-                doc.reference.update({
+                self.d1.update_video(vid_id, {
                     "rag_indexed": True,
-                    "rag_chunk_count": len(chunks),
-                    "rag_indexed_at": now_iso,
+                    "error_log": None,
                     "updated_at": now_iso,
-                }, timeout=60.0)
+                })
 
                 indexed_videos += 1
                 total_vectors += len(chunks)
-                logger.info(f"[INDEXED] {vid_id} -> {len(chunks)} vectors stored in Qdrant & Firestore.")
+                logger.info(f"[INDEXED] {vid_id} -> {len(chunks)} vectors stored in Qdrant & Cloudflare D1.")
                 time.sleep(1.5)
 
             except Exception as e:
                 logger.error(f"[FAILED] RAG indexing error for {vid_id}: {e}")
-                doc.reference.update({
+                self.d1.update_video(vid_id, {
                     "rag_indexed": False,
-                    "rag_error_log": str(e),
+                    "error_log": f"RAG error: {str(e)[:950]}",
                     "updated_at": datetime.now(timezone.utc).isoformat(),
-                }, timeout=60.0)
+                })
 
         logger.info(f"Layer 4 complete. Indexed {indexed_videos} videos ({total_vectors} total vectors).")
 
