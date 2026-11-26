@@ -1,20 +1,29 @@
-Automated 4-Layer Educational Pipeline connected to Cloudflare D1
+EduExtract Automated 4-Layer Educational Pipeline (Cloudflare D1 Backend)
+
+IMPORTANT: Preserve exact 2-space indentation throughout this file.
 
 name: EduExtract Automated Pipeline
 
 on:
+
+Enables manual runs from GitHub UI and API triggers from Cloudflare Worker
+
 workflow_dispatch:
 inputs:
 target_topic:
 description: 'Topic, exact video title, or YouTube URL (leave empty to read D1 queue)'
 required: false
 default: ''
+type: string
 top_k_videos:
 description: 'Number of videos to ingest (1-10)'
 required: false
 default: ''
+type: string
+
+Daily automated schedule at 08:30 UTC (12:00 PM IRST)
+
 schedule:
-# Runs daily at 08:30 UTC (12:00 PM IRST)
 - cron: '30 8 * * *'
 
 jobs:
@@ -22,24 +31,24 @@ run-pipeline:
 runs-on: ubuntu-latest
 
 steps:
-  # 1. Fetch repository source code
+  # Step 1: Clone repository source code
   - name: Checkout Repository
     uses: actions/checkout@v4
 
-  # 2. Configure Python environment with pip caching
+  # Step 2: Setup Python 3.11 with pip dependency caching
   - name: Set up Python 3.11
     uses: actions/setup-python@v5
     with:
       python-version: '3.11'
       cache: 'pip'
 
-  # 3. Install required Python libraries (no Firebase)
+  # Step 3: Install Python libraries (Cloudflare D1 client, yt-dlp, Gemini, Qdrant, etc.)
   - name: Install Dependencies
     run: |
       python -m pip install --upgrade pip
       pip install -r requirements.txt
 
-  # 4. Cache HuggingFace punctuation model and learned ASR glossary
+  # Step 4: Cache HuggingFace punctuation model and learned ASR glossary across runs
   - name: Cache HuggingFace Models & ASR Glossary
     uses: actions/cache@v4
     with:
@@ -50,7 +59,7 @@ steps:
       restore-keys: |
         ${{ runner.os }}-eduextract-models-
 
-  # 5. Layer 1: Discover videos / direct YouTube URL and extract transcripts into D1
+  # Step 5 (Layer 1): Discover YouTube videos or direct URL and store raw transcripts in D1
   - name: Run Layer 1 - Discovery & Transcript Ingestion (D1)
     continue-on-error: true
     env:
@@ -59,13 +68,13 @@ steps:
       YOUTUBE_PROXY_URL: ${{ secrets.YOUTUBE_PROXY_URL }}
       PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
       CLOUDFLARE_WORKER_URL: https://eduextract-chat.ssa210819.workers.dev
-      TARGET_TOPIC: ${{ github.event.inputs.target_topic || '' }}
-      TOP_K_VIDEOS: ${{ github.event.inputs.top_k_videos || '' }}
+      TARGET_TOPIC: ${{ inputs.target_topic }}
+      TOP_K_VIDEOS: ${{ inputs.top_k_videos }}
     run: |
-      echo "Active TARGET_TOPIC: $TARGET_TOPIC - TOP_K_VIDEOS:$TOP_K_VIDEOS"
+      echo "Active TARGET_TOPIC: $TARGET_TOPIC \vert{} TOP_K_VIDEOS:$TOP_K_VIDEOS"
       python src/main_ingestion.py
 
-  # 6. Layer 2: Clean noise, apply ASR corrections, restore punctuation, and chunk
+  # Step 6 (Layer 2): Denoise transcripts, fix ASR typos, restore punctuation, and chunk
   - name: Run Layer 2 - Cleaning, Punctuation & Semantic Chunking (D1)
     continue-on-error: true
     env:
@@ -74,7 +83,7 @@ steps:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
     run: python src/main_processing.py
 
-  # 7. Layer 3: Synthesize study guide, flashcards, PDF, and QA telemetry
+  # Step 7 (Layer 3): Synthesize academic study guides, flashcards, PDFs, and QA telemetry
   - name: Run Layer 3 - Flashcards & Study Guide PDF Synthesis (D1)
     continue-on-error: true
     env:
@@ -83,7 +92,7 @@ steps:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     run: python src/main_synthesis.py
 
-  # 8. Layer 4: Generate 768-D embeddings and upsert RAG vectors into D1 & Qdrant
+  # Step 8 (Layer 4): Generate 768-D embeddings and upsert RAG vectors into D1 and Qdrant
   - name: Run Layer 4 - RAG Vector Indexing (D1 + Qdrant)
     continue-on-error: true
     env:
@@ -92,7 +101,7 @@ steps:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     run: python src/main_rag_indexer.py
 
-  # 9. Save generated PDFs, Anki CSVs, and local Qdrant artifacts
+  # Step 9: Archive generated PDF study guides, Anki CSVs, and local Qdrant DB
   - name: Upload Generated PDFs, Flashcards & Vector DB
     uses: actions/upload-artifact@v4
     if: always()
