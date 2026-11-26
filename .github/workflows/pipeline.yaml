@@ -1,111 +1,157 @@
-EduExtract Automated 4-Layer Educational Pipeline (Cloudflare D1 Backend)
+"""
+EduExtract Workflow Generator & Validator (fix_workflow.py)
 
-IMPORTANT: Preserve exact 2-space indentation throughout this file.
+Automatically writes a clean, 100% valid `.github/workflows/pipeline.yaml` file
+with exact 2-space YAML indentation and Unix (LF) line endings so copy-paste
+formatting issues can never break GitHub Actions.
+"""
 
+import sys
+from pathlib import Path
+
+# Exact, indentation-verified GitHub Actions workflow definition
+WORKFLOW_YAML = """\
 name: EduExtract Automated Pipeline
 
 on:
-
-Enables manual runs from GitHub UI and API triggers from Cloudflare Worker
-
-workflow_dispatch:
-inputs:
-target_topic:
-description: 'Topic, exact video title, or YouTube URL (leave empty to read D1 queue)'
-required: false
-default: ''
-type: string
-top_k_videos:
-description: 'Number of videos to ingest (1-10)'
-required: false
-default: ''
-type: string
-
-Daily automated schedule at 08:30 UTC (12:00 PM IRST)
-
-schedule:
-- cron: '30 8 * * *'
+  workflow_dispatch:
+    inputs:
+      target_topic:
+        description: 'Topic, exact video title, or YouTube URL (leave empty to read D1 queue)'
+        required: false
+        default: ''
+        type: string
+      top_k_videos:
+        description: 'Number of videos to ingest (1-10)'
+        required: false
+        default: ''
+        type: string
+  schedule:
+    - cron: '30 8 * * *'
 
 jobs:
-run-pipeline:
-runs-on: ubuntu-latest
+  run-pipeline:
+    runs-on: ubuntu-latest
 
-steps:
-  # Step 1: Clone repository source code
-  - name: Checkout Repository
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-  # Step 2: Setup Python 3.11 with pip dependency caching
-  - name: Set up Python 3.11
-    uses: actions/setup-python@v5
-    with:
-      python-version: '3.11'
-      cache: 'pip'
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
 
-  # Step 3: Install Python libraries (Cloudflare D1 client, yt-dlp, Gemini, Qdrant, etc.)
-  - name: Install Dependencies
-    run: |
-      python -m pip install --upgrade pip
-      pip install -r requirements.txt
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-  # Step 4: Cache HuggingFace punctuation model and learned ASR glossary across runs
-  - name: Cache HuggingFace Models & ASR Glossary
-    uses: actions/cache@v4
-    with:
-      path: |
-        ~/.cache/huggingface
-        artifacts/asr_glossary_cache.json
-      key: ${{ runner.os }}-eduextract-models-v2
-      restore-keys: |
-        ${{ runner.os }}-eduextract-models-
+      - name: Cache HuggingFace Models and ASR Glossary
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            artifacts/asr_glossary_cache.json
+          key: ${{ runner.os }}-eduextract-models-v2
+          restore-keys: |
+            ${{ runner.os }}-eduextract-models-
 
-  # Step 5 (Layer 1): Discover YouTube videos or direct URL and store raw transcripts in D1
-  - name: Run Layer 1 - Discovery & Transcript Ingestion (D1)
-    continue-on-error: true
-    env:
-      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-      YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-      YOUTUBE_PROXY_URL: ${{ secrets.YOUTUBE_PROXY_URL }}
-      PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
-      CLOUDFLARE_WORKER_URL: https://eduextract-chat.ssa210819.workers.dev
-      TARGET_TOPIC: ${{ inputs.target_topic }}
-      TOP_K_VIDEOS: ${{ inputs.top_k_videos }}
-    run: |
-      echo "Active TARGET_TOPIC: $TARGET_TOPIC \vert{} TOP_K_VIDEOS:$TOP_K_VIDEOS"
-      python src/main_ingestion.py
+      - name: Run Layer 1 - Discovery and Transcript Ingestion (D1)
+        continue-on-error: true
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
+          YOUTUBE_PROXY_URL: ${{ secrets.YOUTUBE_PROXY_URL }}
+          PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
+          CLOUDFLARE_WORKER_URL: https://eduextract-chat.ssa210819.workers.dev
+          TARGET_TOPIC: ${{ inputs.target_topic }}
+          TOP_K_VIDEOS: ${{ inputs.top_k_videos }}
+        run: |
+          echo "Active TARGET_TOPIC=$TARGET_TOPIC TOP_K_VIDEOS=$TOP_K_VIDEOS"
+          python src/main_ingestion.py
 
-  # Step 6 (Layer 2): Denoise transcripts, fix ASR typos, restore punctuation, and chunk
-  - name: Run Layer 2 - Cleaning, Punctuation & Semantic Chunking (D1)
-    continue-on-error: true
-    env:
-      PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
-      CLOUDFLARE_WORKER_URL: https://eduextract-chat.ssa210819.workers.dev
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-    run: python src/main_processing.py
+      - name: Run Layer 2 - Cleaning, Punctuation and Semantic Chunking (D1)
+        continue-on-error: true
+        env:
+          PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
+          CLOUDFLARE_WORKER_URL: https://eduextract-chat.ssa210819.workers.dev
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python src/main_processing.py
 
-  # Step 7 (Layer 3): Synthesize academic study guides, flashcards, PDFs, and QA telemetry
-  - name: Run Layer 3 - Flashcards & Study Guide PDF Synthesis (D1)
-    continue-on-error: true
-    env:
-      PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
-      CLOUDFLARE_WORKER_URL: https://eduextract-chat.ssa210819.workers.dev
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-    run: python src/main_synthesis.py
+      - name: Run Layer 3 - Flashcards and Study Guide PDF Synthesis (D1)
+        continue-on-error: true
+        env:
+          PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
+          CLOUDFLARE_WORKER_URL: https://eduextract-chat.ssa210819.workers.dev
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python src/main_synthesis.py
 
-  # Step 8 (Layer 4): Generate 768-D embeddings and upsert RAG vectors into D1 and Qdrant
-  - name: Run Layer 4 - RAG Vector Indexing (D1 + Qdrant)
-    continue-on-error: true
-    env:
-      PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
-      CLOUDFLARE_WORKER_URL: https://eduextract-chat.ssa210819.workers.dev
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-    run: python src/main_rag_indexer.py
+      - name: Run Layer 4 - RAG Vector Indexing (D1 and Qdrant)
+        continue-on-error: true
+        env:
+          PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
+          CLOUDFLARE_WORKER_URL: https://eduextract-chat.ssa210819.workers.dev
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python src/main_rag_indexer.py
 
-  # Step 9: Archive generated PDF study guides, Anki CSVs, and local Qdrant DB
-  - name: Upload Generated PDFs, Flashcards & Vector DB
-    uses: actions/upload-artifact@v4
-    if: always()
-    with:
-      name: eduextract-study-materials
-      path: artifacts/
-      retention-days: 30
+      - name: Upload Generated PDFs, Flashcards and Vector DB
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eduextract-study-materials
+          path: artifacts/
+          retention-days: 30
+"""
+
+
+def validate_yaml_structure(content: str) -> None:
+    """
+    Validates basic structural indentation and, if PyYAML is installed,
+    parses the YAML document to guarantee zero syntax errors.
+    """
+    lines = content.splitlines()
+    if len(lines) < 5 or not lines[0].startswith("name: "):
+        raise ValueError("Workflow must start with a valid 'name:' header on line 1.")
+    if lines[2] != "on:" or not lines[3].startswith("  workflow_dispatch:"):
+        raise ValueError("Invalid indentation detected near 'on:' / 'workflow_dispatch:'.")
+
+    try:
+        import yaml  # type: ignore
+
+        parsed = yaml.safe_load(content)
+        # Note: YAML 1.1 loads bare `on` as boolean True
+        triggers = parsed.get("on") or parsed.get(True) or {}
+        if "workflow_dispatch" not in triggers:
+            raise ValueError("Parsed YAML is missing 'workflow_dispatch' trigger.")
+        print("[OK] PyYAML syntax & trigger validation passed.")
+    except ImportError:
+        print("[OK] Structural indentation validation passed (PyYAML not installed).")
+
+
+def write_workflow_file() -> Path:
+    """Writes `.github/workflows/pipeline.yaml` using UTF-8 encoding and LF newlines."""
+    target = Path(".github") / "workflows" / "pipeline.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    validate_yaml_structure(WORKFLOW_YAML)
+    target.write_text(WORKFLOW_YAML, encoding="utf-8", newline="\n")
+    return target
+
+
+def main() -> int:
+    try:
+        written_path = write_workflow_file()
+        print(f"[SUCCESS] Clean workflow written to: {written_path.resolve()}")
+        print("Next step: run these commands to push to GitHub:")
+        print("  git add .github/workflows/pipeline.yaml")
+        print('  git commit -m "fix: valid workflow_dispatch yaml syntax"')
+        print("  git push origin main")
+        return 0
+    except Exception as exc:
+        print(f"[ERROR] Failed to generate workflow file: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
