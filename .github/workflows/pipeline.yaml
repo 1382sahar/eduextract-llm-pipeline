@@ -1,3 +1,5 @@
+Automated 4-Layer Educational Pipeline connected to Cloudflare D1
+
 name: EduExtract Automated Pipeline
 
 on:
@@ -20,20 +22,24 @@ run-pipeline:
 runs-on: ubuntu-latest
 
 steps:
+  # 1. Fetch repository source code
   - name: Checkout Repository
     uses: actions/checkout@v4
 
+  # 2. Configure Python environment with pip caching
   - name: Set up Python 3.11
     uses: actions/setup-python@v5
     with:
       python-version: '3.11'
       cache: 'pip'
 
+  # 3. Install required Python libraries (no Firebase)
   - name: Install Dependencies
     run: |
       python -m pip install --upgrade pip
       pip install -r requirements.txt
 
+  # 4. Cache HuggingFace punctuation model and learned ASR glossary
   - name: Cache HuggingFace Models & ASR Glossary
     uses: actions/cache@v4
     with:
@@ -44,6 +50,7 @@ steps:
       restore-keys: |
         ${{ runner.os }}-eduextract-models-
 
+  # 5. Layer 1: Discover videos / direct YouTube URL and extract transcripts into D1
   - name: Run Layer 1 - Discovery & Transcript Ingestion (D1)
     continue-on-error: true
     env:
@@ -55,9 +62,10 @@ steps:
       TARGET_TOPIC: ${{ github.event.inputs.target_topic || '' }}
       TOP_K_VIDEOS: ${{ github.event.inputs.top_k_videos || '' }}
     run: |
-      echo ">>> Active TARGET_TOPIC: '$TARGET_TOPIC' \vert{} TOP_K_VIDEOS: '$TOP_K_VIDEOS'"
+      echo "Active TARGET_TOPIC: $TARGET_TOPIC - TOP_K_VIDEOS:$TOP_K_VIDEOS"
       python src/main_ingestion.py
 
+  # 6. Layer 2: Clean noise, apply ASR corrections, restore punctuation, and chunk
   - name: Run Layer 2 - Cleaning, Punctuation & Semantic Chunking (D1)
     continue-on-error: true
     env:
@@ -66,6 +74,7 @@ steps:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
     run: python src/main_processing.py
 
+  # 7. Layer 3: Synthesize study guide, flashcards, PDF, and QA telemetry
   - name: Run Layer 3 - Flashcards & Study Guide PDF Synthesis (D1)
     continue-on-error: true
     env:
@@ -74,6 +83,7 @@ steps:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     run: python src/main_synthesis.py
 
+  # 8. Layer 4: Generate 768-D embeddings and upsert RAG vectors into D1 & Qdrant
   - name: Run Layer 4 - RAG Vector Indexing (D1 + Qdrant)
     continue-on-error: true
     env:
@@ -82,6 +92,7 @@ steps:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     run: python src/main_rag_indexer.py
 
+  # 9. Save generated PDFs, Anki CSVs, and local Qdrant artifacts
   - name: Upload Generated PDFs, Flashcards & Vector DB
     uses: actions/upload-artifact@v4
     if: always()
