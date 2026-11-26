@@ -1,16 +1,3 @@
-"""
-EduExtract Workflow Generator & Validator (fix_workflow.py)
-
-Automatically writes a clean, 100% valid `.github/workflows/pipeline.yaml` file
-with exact 2-space YAML indentation and Unix (LF) line endings so copy-paste
-formatting issues can never break GitHub Actions.
-"""
-
-import sys
-from pathlib import Path
-
-# Exact, indentation-verified GitHub Actions workflow definition
-WORKFLOW_YAML = """\
 name: EduExtract Automated Pipeline
 
 on:
@@ -103,55 +90,3 @@ jobs:
           name: eduextract-study-materials
           path: artifacts/
           retention-days: 30
-"""
-
-
-def validate_yaml_structure(content: str) -> None:
-    """
-    Validates basic structural indentation and, if PyYAML is installed,
-    parses the YAML document to guarantee zero syntax errors.
-    """
-    lines = content.splitlines()
-    if len(lines) < 5 or not lines[0].startswith("name: "):
-        raise ValueError("Workflow must start with a valid 'name:' header on line 1.")
-    if lines[2] != "on:" or not lines[3].startswith("  workflow_dispatch:"):
-        raise ValueError("Invalid indentation detected near 'on:' / 'workflow_dispatch:'.")
-
-    try:
-        import yaml  # type: ignore
-
-        parsed = yaml.safe_load(content)
-        # Note: YAML 1.1 loads bare `on` as boolean True
-        triggers = parsed.get("on") or parsed.get(True) or {}
-        if "workflow_dispatch" not in triggers:
-            raise ValueError("Parsed YAML is missing 'workflow_dispatch' trigger.")
-        print("[OK] PyYAML syntax & trigger validation passed.")
-    except ImportError:
-        print("[OK] Structural indentation validation passed (PyYAML not installed).")
-
-
-def write_workflow_file() -> Path:
-    """Writes `.github/workflows/pipeline.yaml` using UTF-8 encoding and LF newlines."""
-    target = Path(".github") / "workflows" / "pipeline.yaml"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    validate_yaml_structure(WORKFLOW_YAML)
-    target.write_text(WORKFLOW_YAML, encoding="utf-8", newline="\n")
-    return target
-
-
-def main() -> int:
-    try:
-        written_path = write_workflow_file()
-        print(f"[SUCCESS] Clean workflow written to: {written_path.resolve()}")
-        print("Next step: run these commands to push to GitHub:")
-        print("  git add .github/workflows/pipeline.yaml")
-        print('  git commit -m "fix: valid workflow_dispatch yaml syntax"')
-        print("  git push origin main")
-        return 0
-    except Exception as exc:
-        print(f"[ERROR] Failed to generate workflow file: {exc}", file=sys.stderr)
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
